@@ -1,0 +1,441 @@
+{
+	"info": {
+		"_postman_id": "b534db81-2103-465c-91f6-7d2eb04ea913",
+		"name": "Automation Anywhere - AI Agent Studio - Custom model definitions",
+		"description": "This Postman collection contains example API calls to connect to the new Model Definition API and create, list and delete custom model definitions in your A360 tenant.",
+		"schema": "https://schema.getpostman.com/json/collection/v2.0.0/collection.json",
+		"_exporter_id": "217877"
+	},
+	"item": [
+		{
+			"name": "Authentication",
+			"item": [
+				{
+					"name": "Login & retrieve bearer token",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test(\"Status code is 200\", function () {\r",
+									"    pm.response.to.have.status(200);\r",
+									"});\r",
+									"\r",
+									"var jsonData = JSON.parse(responseBody);\r",
+									"postman.setEnvironmentVariable(\"createModelUserToken\", jsonData.token);"
+								],
+								"type": "text/javascript",
+								"packages": {}
+							}
+						}
+					],
+					"request": {
+						"method": "POST",
+						"header": [],
+						"body": {
+							"mode": "raw",
+							"raw": "{\r\n    \"username\": \"{{defaultUsername}}\",\r\n    \"password\": \"{{defaultuserpassword}}\"\r\n}",
+							"options": {
+								"raw": {
+									"language": "json"
+								}
+							}
+						},
+						"url": "{{host}}/v2/authentication",
+						"description": "The `POST /v2/authentication` endpoint is used to authenticate a user by providing their username and password in the request body.\n\n### Request Body\n\n- `username` (string, required): The username of the user.\n    \n- `password` (string, required): The password of the user.\n    \n\n### Response\n\nThe response will be a JSON object with the following properties:\n\n- `token` (string): The authentication token.\n    \n- `user` (object): Information about the authenticated user, including their ID, username, domain, first name, last name, email, and other user-related details.\n    \n- `permissions` (array): An array of objects containing the user's permissions, with each object having an `action` and `resourceType`.\n    \n- `tenantUuid` (string): The UUID of the tenant.\n    \n- `ttlSeconds` (string): Time to live in seconds.\n    \n- `changePasswordToken` (string): The token for changing the user's password.\n    \n\n``` json\n{\n  \"type\": \"object\",\n  \"properties\": {\n    \"token\": {\"type\": \"string\"},\n    \"user\": {\n      \"type\": \"object\",\n      \"properties\": {\n        \"id\": {\"type\": \"string\"},\n        \"username\": {\"type\": \"string\"},\n        \"domain\": {\"type\": \"string\"},\n        \"firstName\": {\"type\": \"string\"},\n        \"lastName\": {\"type\": \"string\"},\n        \"version\": {\"type\": \"integer\"},\n        \"principalId\": {\"type\": \"string\"},\n        \"email\": {\"type\": \"string\"},\n        \"emailVerified\": {\"type\": \"boolean\"},\n        \"passwordSet\": {\"type\": \"boolean\"},\n        \"questionsSet\": {\"type\": \"boolean\"},\n        \"enableAutoLogin\": {\"type\": \"boolean\"},\n        \"disabled\": {\"type\": \"boolean\"},\n        \"clientRegistered\": {\"type\": \"boolean\"},\n        \"description\": {\"type\": \"string\"},\n        \"createdBy\": {\"type\": \"string\"},\n        \"createdOn\": {\"type\": \"string\"},\n        \"updatedBy\": {\"type\": \"string\"},\n        \"updatedOn\": {\"type\": \"string\"},\n        \"licenseFeatures\": {\"type\": \"array\", \"items\": {\"type\": \"string\"}},\n        \"roles\": {\n          \"type\": \"array\",\n          \"items\": {\n            \"type\": \"object\",\n            \"properties\": {\n              \"id\": {\"type\": \"string\"},\n              \"name\": {\"type\": \"string\"}\n            }\n          }\n        },\n        \"deleted\": {\"type\": \"boolean\"},\n        \"lastLoginTime\": {\"type\": \"string\"},\n        \"multipleLoginAllowed\": {\"type\": \"boolean\"}\n      }\n    },\n    \"permissions\": {\n      \"type\": \"array\",\n      \"items\": {\n        \"type\": \"object\",\n        \"properties\": {\n          \"action\": {\"type\": \"string\"},\n          \"resourceType\": {\"type\": \"string\"}\n        }\n      }\n    },\n    \"tenantUuid\": {\"type\": \"string\"},\n    \"ttlSeconds\": {\"type\": \"string\"},\n    \"changePasswordToken\": {\"type\": \"string\"}\n  }\n}\n\n ```"
+					},
+					"response": []
+				}
+			],
+			"description": "Start here, this folder contains a method to login to your A360 Control Room and capture the authentication token for use in other APIs in this collection."
+		},
+		{
+			"name": "Create custom model definition",
+			"item": [
+				{
+					"name": "Create custom model definition - Hugging Face - Meta Llama 3 8B (Bearer)",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									""
+								],
+								"type": "text/javascript",
+								"packages": {}
+							}
+						}
+					],
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "X-Authorization",
+								"value": "{{createModelUserToken}}",
+								"type": "text"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\r\n    \"name\": \"AAI Docs Example - Hugging Face\",\r\n    \"version\": \"0\",\r\n    \"authAction\": {\r\n        \"authType\": \"CUSTOM_KEYS\",\r\n        \"customKeys\": {\r\n            \"keys\": [\r\n                {\r\n                    \"location\": \"header\",\r\n                    \"keyName\": \"Authorization\",\r\n                    \"prefix\": \"Bearer \"\r\n                }\r\n            ]\r\n        }\r\n    },\r\n    \"apiType\": \"REST\",\r\n    \"actions\": [\r\n        {\r\n            \"name\": \"Meta-Llama-3-8B\",\r\n            \"displayName\": \"Meta-Llama-3-8B\",\r\n            \"description\" : \"Meta developed and released the Meta Llama 3 family of large language models (LLMs), a collection of pretrained and instruction tuned generative text models in 8 and 70B sizes. The Llama 3 instruction tuned models are optimized for dialogue use cases and outperform many of the available open source chat models on common industry benchmarks. Further, in developing these models, we took great care to optimize helpfulness and safety.\",\r\n            \"method\": \"POST\",\r\n            \"uri\": \"https://router.huggingface.co/novita/v3/openai/chat/completions\",\r\n            \"params\": [\r\n                {\r\n                    \"type\": \"HEADERS\"\r\n                },\r\n                {\r\n                    \"type\": \"QUERY_PARAM\"\r\n                },\r\n                {\r\n                    \"type\": \"PATH_PARAM\"\r\n                }\r\n            ],\r\n            \"request\": {\r\n                \"raw\": {\r\n                    \"body\": \"{\\n        \\\"messages\\\": [\\n            {\\n                \\\"role\\\": \\\"user\\\",\\n                \\\"content\\\": \\\"What is the capital of France?\\\"\\n            }\\n        ],\\n        \\\"model\\\": \\\"meta-llama/llama-3-8b-instruct\\\",\\n        \\\"stream\\\": false\\n    }\",\r\n                    \"variables\": [\r\n                        {\r\n                            \"path\": \"$.max_tokens\",\r\n                            \"attribute\": {\r\n                                \"name\": \"max_tokens\",\r\n                                \"label\": \"max_tokens\",\r\n                                \"value\": {\r\n                                    \"type\": \"INTEGER\",\r\n                                    \"number\": \"500\"\r\n                                },\r\n                                \"annotations\": [\r\n                                    \"REQUEST_PARAMETER\"\r\n                                ]\r\n                            }\r\n                        },\r\n                        {\r\n                            \"path\": \"$.messages[0].content\",\r\n                            \"attribute\": {\r\n                                \"name\": \"prompt\",\r\n                                \"label\": \"prompt\",\r\n                                \"value\": {\r\n                                    \"type\": \"TEXT\"\r\n                                },\r\n                                \"annotations\": [\r\n                                    \"PROMPT_QUERY\"\r\n                                ]\r\n                            }\r\n                        }\r\n                    ]\r\n                }\r\n            },\r\n            \"response\": {\r\n                \"body\": \"{\\n    \\\"object\\\": \\\"chat.completion\\\",\\n    \\\"id\\\": \\\"\\\",\\n    \\\"created\\\": 1729550579,\\n    \\\"model\\\": \\\"meta-llama/Meta-Llama-3-8B-Instruct\\\",\\n    \\\"system_fingerprint\\\": \\\"2.3.1-dev0-sha-169178b\\\",\\n    \\\"choices\\\": [\\n        {\\n            \\\"index\\\": 0,\\n            \\\"message\\\": {\\n                \\\"role\\\": \\\"assistant\\\",\\n                \\\"content\\\": \\\"Hey there, 7th grader!\\\"\\n            },\\n            \\\"logprobs\\\": null,\\n            \\\"finish_reason\\\": \\\"length\\\"\\n        }\\n    ],\\n    \\\"usage\\\": {\\n        \\\"prompt_tokens\\\": 21,\\n        \\\"completion_tokens\\\": 500,\\n        \\\"total_tokens\\\": 521\\n    }\\n}\",\r\n                \"variables\": [\r\n                    {\r\n                        \"path\": \"$.usage.completion_tokens\",\r\n                        \"attribute\": {\r\n                            \"name\": \"completionTokenCount\",\r\n                            \"label\": \"completionTokenCount\",\r\n                            \"value\": {\r\n                                \"type\": \"INTEGER\"\r\n                            },\r\n                            \"annotations\": [\r\n                                \"RESPONSE_PARAMETER\"\r\n                            ],\r\n                            \"canonicalName\": \"usage.completion_tokens\"\r\n                        }\r\n                    },\r\n                    {\r\n                        \"path\": \"$.choices[0].message.content\",\r\n                        \"attribute\": {\r\n                            \"name\": \"content\",\r\n                            \"label\": \"content\",\r\n                            \"value\": {\r\n                                \"type\": \"TEXT\",\r\n                                \"string\": \"Blackholes are great!\"\r\n                            },\r\n                            \"annotations\": [\r\n                                \"RESPONSE_PARAMETER\"\r\n                            ],\r\n                            \"canonicalName\": \"choices[0].value\"\r\n                        }\r\n                    },\r\n                    {\r\n                        \"path\": \"$.usage.prompt_tokens\",\r\n                        \"attribute\": {\r\n                            \"name\": \"promptTokenCount\",\r\n                            \"label\": \"promptTokenCount\",\r\n                            \"value\": {\r\n                                \"type\": \"INTEGER\"\r\n                            },\r\n                            \"annotations\": [\r\n                                \"RESPONSE_PARAMETER\"\r\n                            ],\r\n                            \"canonicalName\": \"usage.prompt_tokens\"\r\n                        }\r\n                    },\r\n                    {\r\n                        \"path\": \"$.usage.total_tokens\",\r\n                        \"attribute\": {\r\n                            \"name\": \"totalTokenCount\",\r\n                            \"label\": \"totalTokenCount\",\r\n                            \"value\": {\r\n                                \"type\": \"INTEGER\"\r\n                            },\r\n                            \"annotations\": [\r\n                                \"RESPONSE_PARAMETER\"\r\n                            ],\r\n                            \"canonicalName\": \"usage.total_tokens\"\r\n                        }\r\n                    }\r\n                ]\r\n            }\r\n        }\r\n    ]\r\n}",
+							"options": {
+								"raw": {
+									"language": "json"
+								}
+							}
+						},
+						"url": "{{host}}/gai/prompttools/v1/custommodel",
+						"description": "### Create Custom Model Endpoint\n\nThis API endpoint allows you to create a custom model definition. Once created, this model definition will be an available option when creating a Model Connection in AI Agent Studio.\n\nIn this example, we are creating a model definition for the Meta Llama 3 8B model hosted on Hugging Face. NOTE: this example utilizes OAuth as the credentials to authenticate the model in Hugging Face.\n\n#### Request\n\nThe request should be sent as an HTTP POST to `{{host}}/gai/prompttools/v1/custommodel`.\n\nThe request payload should be in the raw format and include the following parameters:\n\n- `name`: The name of the model.\n    \n- `authAction`: An object containing authentication details such as `authType` and `customKeys`.\n    \n- `apiType`: The type of API, in this case, it should be \"REST\".\n    \n- `actions`: An array of actions containing details about the model, such as `name`, `displayName`, `description`, `method`, and `uri`.\n    \n- `params`: An array specifying the type of parameters, in this case, it's \"HEADERS\".\n    \n- `request`: The request body containing the model details, such as `model` and `variables`.\n    \n\n#### Response\n\nThe response will be in JSON format and will include the following schema:\n\n``` json\n{\n    \"object\": \"chat.completi ...\",\n    \"usage\": {\n        \"completionTokenCount\": <INTEGER>\n    }\n}\n\n ```\n\nThe `completionTokenCount` will be an integer representing the count of completion tokens used."
+					},
+					"response": []
+				},
+				{
+					"name": "Create custom model definition - Azure OpenAI - o3-mini (Bearer)",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test(\"Status code is 200\", function () {\r",
+									"    pm.response.to.have.status(200);\r",
+									"});\r",
+									"\r",
+									"pm.test(\"Validate Vendor Name\", function () {\r",
+									"    var jsonData = pm.response.json();\r",
+									"    pm.expect(jsonData.name).contains(\"CustomVendor-API_KEY-Auth\");\r",
+									"});\r",
+									"\r",
+									"pm.test(\"Validate Model Name\", function () {\r",
+									"    var jsonData = pm.response.json();\r",
+									"    pm.expect(jsonData.actions[0].name).to.eql(\"gpt-35-turbo\");\r",
+									"});"
+								],
+								"type": "text/javascript",
+								"packages": {}
+							}
+						}
+					],
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "X-Authorization",
+								"value": "{{createModelUserToken}}",
+								"type": "text"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\r\n            \"name\": \"AAI Docs Example - Azure OpenAI\",\r\n            \"version\": \"0\",\r\n            \"authAction\": {\r\n                \"authType\": \"CUSTOM_KEYS\",\r\n                \"customKeys\": {\r\n                    \"keys\": [\r\n                        {\r\n                            \"location\": \"header\",\r\n                            \"keyName\": \"Authorization\",\r\n                            \"prefix\": \"Bearer \",\r\n                            \"label\": \"Authorization\"\r\n                        }\r\n                    ]\r\n                }\r\n            },\r\n            \"apiType\": \"REST\",\r\n            \"actions\": [\r\n                {\r\n                    \"name\": \"o3-mini\",\r\n                    \"displayName\": \"o3-mini\",\r\n                    \"description\": \"The o1 and o3 series models are specifically designed to tackle reasoning and problem-solving tasks with increased focus and capability. These models spend more time processing and understanding the user's request, making them exceptionally strong in areas like science, coding, math and similar fields. For example, o1 can be used by healthcare researchers to annotate cell sequencing data, by physicists to generate complicated mathematical formulas needed for quantum optics, and by developers in all fields to build and execute multi-step workflows.\",\r\n                    \"method\": \"POST\",\r\n                    \"uri\": \"https://{project}.openai.azure.com/openai/deployments/{deployment}/chat/completions?api-version={apiVersion}\",\r\n                    \"params\": [\r\n                        {\r\n                            \"type\": \"HEADERS\"\r\n                        },\r\n                        {\r\n                            \"type\": \"QUERY_PARAM\"\r\n                        },\r\n                        {\r\n                            \"type\": \"PATH_PARAM\",\r\n                            \"attribute\": [\r\n                                {\r\n                                    \"name\": \"project\",\r\n                                    \"label\": \"Project\",\r\n                                    \"value\": {\r\n                                        \"type\": \"TEXT\",\r\n                                        \"string\": \"charlieaai-openai2\"\r\n                                    }\r\n                                }\r\n                            ]\r\n                        },\r\n                        {\r\n                            \"type\": \"PATH_PARAM\",\r\n                            \"attribute\": [\r\n                                {\r\n                                    \"name\": \"deployment\",\r\n                                    \"label\": \"Deployment\",\r\n                                    \"value\": {\r\n                                        \"type\": \"TEXT\",\r\n                                        \"string\": \"o3-mini\"\r\n                                    }\r\n                                }\r\n                            ]\r\n                        },\r\n                        {\r\n                            \"type\": \"PATH_PARAM\",\r\n                            \"attribute\": [\r\n                                {\r\n                                    \"name\": \"apiVersion\",\r\n                                    \"label\": \"API Version\",\r\n                                    \"value\": {\r\n                                        \"type\": \"TEXT\",\r\n                                        \"string\": \"2025-01-01-preview\"\r\n                                    }\r\n                                }\r\n                            ]\r\n                        }\r\n                    ],\r\n                    \"request\": {\r\n                        \"raw\": {\r\n                            \"body\": \"{\\\"model\\\": \\\"o3-mini\\\",\\\"messages\\\":[{\\\"role\\\":\\\"system\\\",\\\"content\\\":\\\"system prompt\\\"},{\\\"role\\\":\\\"user\\\",\\\"content\\\":\\\"some prompt query\\\"}],\\\"max_completion_tokens\\\":500}\",\r\n                            \"variables\": [\r\n                                {\r\n                                    \"path\": \"$.max_completion_tokens\",\r\n                                    \"attribute\": {\r\n                                        \"name\": \"max_completion_tokens\",\r\n                                        \"label\": \"Max tokens\",\r\n                                        \"value\": {\r\n                                            \"type\": \"INTEGER\",\r\n                                            \"number\": \"2048\"\r\n                                        },\r\n                                        \"annotations\": [\r\n                                            \"MODEL_PARAMETER\"\r\n                                        ],\r\n                                        \"canonicalName\": \"choices[0].completionTokens\"\r\n                                    }\r\n                                },\r\n                                {\r\n                                    \"path\": \"$.messages[1].content\",\r\n                                    \"attribute\": {\r\n                                        \"name\": \"prompt\",\r\n                                        \"label\": \"prompt\",\r\n                                        \"value\": {\r\n                                            \"type\": \"TEXT\"\r\n                                        },\r\n                                        \"annotations\": [\r\n                                            \"PROMPT_QUERY\"\r\n                                        ]\r\n                                    }\r\n                                },\r\n                                {\r\n                                    \"path\": \"$.messages[0].content\",\r\n                                    \"attribute\": {\r\n                                        \"name\": \"systemPrompt\",\r\n                                        \"label\": \"System Prompt\",\r\n                                        \"value\": {\r\n                                            \"type\": \"TEXT\"\r\n                                        },\r\n                                        \"annotations\": [\r\n                                            \"SYSTEM_PROMPT_MESSAGE\"\r\n                                        ]\r\n                                    }\r\n                                }\r\n                            ]\r\n                        }\r\n                    },\r\n                    \"response\": {\r\n                        \"body\": \"{\\n    \\\"id\\\": \\\"chatcmpl-APwQdLa9WCQAdZg0dO5OjGr2ER4sX\\\",\\n    \\\"object\\\": \\\"chat.completion\\\",\\n    \\\"created\\\": 1730746163,\\n    \\\"model\\\": \\\"o3-mini-2025-01-31\\\",\\n    \\\"choices\\\": [\\n        {\\n            \\\"index\\\": 0,\\n            \\\"message\\\": {\\n                \\\"role\\\": \\\"assistant\\\",\\n                \\\"content\\\": \\\"Sure! They are one of the most mysterious and exciting objects in space.\\\",\\n                \\\"refusal\\\": null\\n            },\\n            \\\"finish_reason\\\": \\\"stop\\\"\\n        }\\n    ],\\n    \\\"usage\\\": {\\n        \\\"prompt_tokens\\\": 17,\\n        \\\"completion_tokens\\\": 959,\\n        \\\"total_tokens\\\": 976,\\n        \\\"prompt_tokens_details\\\": {\\n            \\\"cached_tokens\\\": 0\\n        },\\n        \\\"completion_tokens_details\\\": {\\n            \\\"reasoning_tokens\\\": 64\\n        }\\n    },\\n    \\\"system_fingerprint\\\": \\\"fp_35c19d48ca\\\"\\n}\",\r\n                        \"variables\": [\r\n                            {\r\n                                \"path\": \"$.usage.completion_tokens\",\r\n                                \"attribute\": {\r\n                                    \"name\": \"completion_tokens\",\r\n                                    \"label\": \"completion_tokens\",\r\n                                    \"value\": {\r\n                                        \"type\": \"INTEGER\"\r\n                                    },\r\n                                    \"annotations\": [\r\n                                        \"RESPONSE_PARAMETER\"\r\n                                    ],\r\n                                    \"canonicalName\": \"choices[0].completionTokens\"\r\n                                }\r\n                            },\r\n                            {\r\n                                \"path\": \"$.choices[0].message.content\",\r\n                                \"attribute\": {\r\n                                    \"name\": \"content\",\r\n                                    \"label\": \"content\",\r\n                                    \"value\": {\r\n                                        \"type\": \"TEXT\",\r\n                                        \"string\": \"Some response from LLM\"\r\n                                    },\r\n                                    \"annotations\": [\r\n                                        \"RESPONSE_PARAMETER\"\r\n                                    ],\r\n                                    \"canonicalName\": \"choices[0].value\"\r\n                                }\r\n                            },\r\n                            {\r\n                                \"path\": \"$.model\",\r\n                                \"attribute\": {\r\n                                    \"name\": \"model\",\r\n                                    \"label\": \"model\",\r\n                                    \"value\": {\r\n                                        \"type\": \"TEXT\"\r\n                                    },\r\n                                    \"annotations\": [\r\n                                        \"RESPONSE_PARAMETER\"\r\n                                    ],\r\n                                    \"canonicalName\": \"model_name\"\r\n                                }\r\n                            },\r\n                            {\r\n                                \"path\": \"$.usage.prompt_tokens\",\r\n                                \"attribute\": {\r\n                                    \"name\": \"prompt_tokens\",\r\n                                    \"label\": \"prompt_tokens\",\r\n                                    \"value\": {\r\n                                        \"type\": \"INTEGER\"\r\n                                    },\r\n                                    \"annotations\": [\r\n                                        \"RESPONSE_PARAMETER\"\r\n                                    ],\r\n                                    \"canonicalName\": \"choices[0].promptTokens\"\r\n                                }\r\n                            },\r\n                            {\r\n                                \"path\": \"$.usage.total_tokens\",\r\n                                \"attribute\": {\r\n                                    \"name\": \"total_tokens\",\r\n                                    \"label\": \"total_tokens\",\r\n                                    \"value\": {\r\n                                        \"type\": \"INTEGER\"\r\n                                    },\r\n                                    \"annotations\": [\r\n                                        \"RESPONSE_PARAMETER\"\r\n                                    ],\r\n                                    \"canonicalName\": \"choices[0].totalTokens\"\r\n                                }\r\n                            }\r\n                        ]\r\n                    }\r\n                }\r\n            ]\r\n        }",
+							"options": {
+								"raw": {
+									"language": "json"
+								}
+							}
+						},
+						"url": "{{host}}/gai/prompttools/v1/custommodel",
+						"description": "### Custom Model Creation\n\nThis API endpoint allows you to create a custom model definition. Once created, this model definition will be an available option when creating a Model Connection in AI Agent Studio.\n\nIn this example, we are creating a model definition for the o1-mini model hosted on OpenAI. NOTE: this example utilizes an API Key as the credential used to authenticate the model in OpenAI.\n\n#### Request Body\n\n- name (string): The name of the custom model.\n    \n- version (string): The version of the custom model.\n    \n- authAction (object): Details about the authentication action.\n    \n    - authType (string): The type of authentication used.\n        \n    - apiAuth (object): Details about API authentication.\n        \n        - location (string): The location of the API key.\n            \n        - keyName (string): The name of the API key.\n            \n- apiType (string): The type of API.\n    \n- actions (array): An array of actions for the custom model.\n    \n    - name (string): The name of the action.\n        \n    - displayName (string): The display name of the action.\n        \n    - description (string): A brief description of the action.\n        \n    - method (string): The HTTP method for the action.\n        \n    - uri (string): The URI for the action.\n        \n    - params (array): Parameters for the action.\n        \n    - request (object): Details about the request.\n        \n        - raw (object): The raw request body.\n            \n            - body (string): The raw request body in JSON format.\n                \n            - variables (array): Variables used in the request.\n                \n    - response (object): Details about the response.\n        \n        - body (string): The JSON response body.\n            \n        - variables (array): Variables in the response body.\n            \n            - path (string): The path of the variable in the response.\n                \n            - attribute (object): Details about the variable.\n                \n                - name (string): The name of the variable.\n                    \n                - label (string): The label of the variable.\n                    \n                - value (object): The value of the variable.\n                    \n                - annotations (array): Annotations for the variable.\n                    \n                - canonicalName (string): The canonical name of the variable.\n                    \n\n#### Response (JSON Schema)\n\n``` json\n{\n    \"type\": \"object\",\n    \"properties\": {\n        \"id\": {\n            \"type\": \"string\"\n        },\n        \"usage\": {\n            \"type\": \"object\",\n            \"properties\": {\n                \"completion_tokens\": {\n                    \"type\": \"integer\"\n                }\n            }\n        }\n    }\n}\n\n ```"
+					},
+					"response": []
+				},
+				{
+					"name": "Create custom model definition - OpenAI - GPT-4.1 mini (Bearer)",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test(\"Status code is 200\", function () {\r",
+									"    pm.response.to.have.status(200);\r",
+									"});\r",
+									"\r",
+									"pm.test(\"Validate Vendor Name\", function () {\r",
+									"    var jsonData = pm.response.json();\r",
+									"    pm.expect(jsonData.name).contains(\"CustomVendor-API_KEY-Auth\");\r",
+									"});\r",
+									"\r",
+									"pm.test(\"Validate Model Name\", function () {\r",
+									"    var jsonData = pm.response.json();\r",
+									"    pm.expect(jsonData.actions[0].name).to.eql(\"gpt-35-turbo\");\r",
+									"});"
+								],
+								"type": "text/javascript",
+								"packages": {}
+							}
+						}
+					],
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "X-Authorization",
+								"value": "{{createModelUserToken}}",
+								"type": "text"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\r\n    \"name\": \"AAI Docs Example - OpenAI\",\r\n    \"version\": \"0\",\r\n    \"authAction\": {\r\n        \"authType\": \"CUSTOM_KEYS\",\r\n        \"customKeys\": {\r\n            \"keys\": [\r\n                {\r\n                    \"location\": \"header\",\r\n                    \"keyName\": \"Authorization\",\r\n                    \"prefix\": \"Bearer \"\r\n                }\r\n            ]\r\n        }\r\n    },\r\n    \"apiType\": \"REST\",\r\n    \"actions\": [\r\n        {\r\n            \"name\": \"gpt-4.1-mini\",\r\n            \"displayName\": \"GPT-4.1 mini\",\r\n            \"description\": \"GPT-4.1 mini provides a balance between intelligence, speed, and cost that makes it an attractive model for many use cases.\",\r\n            \"method\": \"POST\",\r\n            \"uri\": \"https://api.openai.com/v1/responses\",\r\n            \"params\": [],\r\n            \"request\": {\r\n                \"raw\": {\r\n                    \"body\": \"{\\n  \\\"model\\\": \\\"gpt-4.1-mini\\\",\\n  \\\"input\\\": [\\n    {\\n      \\\"role\\\": \\\"system\\\",\\n      \\\"content\\\": [\\n        {\\n          \\\"type\\\": \\\"input_text\\\",\\n          \\\"text\\\": \\\"You are an educator trained in teaching science and math to middle school students. Respond to requests in a friendly and cheerful tone. \\\"\\n        }\\n      ]\\n    },\\n    {\\n      \\\"role\\\": \\\"user\\\",\\n      \\\"content\\\": [\\n        {\\n          \\\"type\\\": \\\"input_text\\\",\\n          \\\"text\\\": \\\"What is a blackhole?\\\"\\n        }\\n      ]\\n    }\\n  ],\\n  \\\"text\\\": {\\n    \\\"format\\\": {\\n      \\\"type\\\": \\\"text\\\"\\n    }\\n  },\\n  \\\"temperature\\\": 1,\\n  \\\"max_output_tokens\\\": 2048,\\n  \\\"top_p\\\": 1\\n}\",\r\n                    \"variables\": [\r\n                        {\r\n                            \"path\": \"$.max_output_tokens\",\r\n                            \"attribute\": {\r\n                                \"name\": \"max_output_tokens\",\r\n                                \"label\": \"Max output tokens\",\r\n                                \"value\": {\r\n                                    \"type\": \"INTEGER\",\r\n                                    \"number\": \"2048\"\r\n                                },\r\n                                \"annotations\": [\r\n                                    \"MODEL_PARAMETER\"\r\n                                ]\r\n                            }\r\n                        },\r\n                        {\r\n                            \"path\": \"$.temperature\",\r\n                            \"attribute\": {\r\n                                \"name\": \"temperature\",\r\n                                \"label\": \"Temperature\",\r\n                                \"value\": {\r\n                                    \"type\": \"INTEGER\",\r\n                                    \"number\": \"1\"\r\n                                },\r\n                                \"annotations\": [\r\n                                    \"MODEL_PARAMETER\"\r\n                                ]\r\n                            }\r\n                        },\r\n                        {\r\n                            \"path\": \"$.top_p\",\r\n                            \"attribute\": {\r\n                                \"name\": \"top_p\",\r\n                                \"label\": \"Top P\",\r\n                                \"value\": {\r\n                                    \"type\": \"NUMBER\",\r\n                                    \"number\": \"1\"\r\n                                },\r\n                                \"annotations\": [\r\n                                    \"MODEL_PARAMETER\"\r\n                                ]\r\n                            }\r\n                        },\r\n                        {\r\n                            \"path\": \"$.input[1].content[0].text\",\r\n                            \"attribute\": {\r\n                                \"name\": \"prompt\",\r\n                                \"label\": \"prompt\",\r\n                                \"value\": {\r\n                                    \"type\": \"TEXT\"\r\n                                },\r\n                                \"annotations\": [\r\n                                    \"PROMPT_QUERY\"\r\n                                ]\r\n                            }\r\n                        },\r\n                        {\r\n                            \"path\": \"$.input[0].content[0].text\",\r\n                            \"attribute\": {\r\n                                \"name\": \"systemPrompt\",\r\n                                \"label\": \"System Prompt\",\r\n                                \"value\": {\r\n                                    \"type\": \"TEXT\"\r\n                                },\r\n                                \"annotations\": [\r\n                                    \"SYSTEM_PROMPT_MESSAGE\"\r\n                                ]\r\n                            }\r\n                        }\r\n                    ]\r\n                }\r\n            },\r\n            \"response\": {\r\n                \"body\": \"{\\n    \\\"id\\\": \\\"chatcmpl-APwQdLa9WCQAdZg0dO5OjGr2ER4sX\\\",\\n    \\\"object\\\": \\\"chat.completion\\\",\\n    \\\"created\\\": 1730746163,\\n    \\\"model\\\": \\\"o1-mini-2024-09-12\\\",\\n    \\\"choices\\\": [\\n        {\\n            \\\"index\\\": 0,\\n            \\\"message\\\": {\\n                \\\"role\\\": \\\"assistant\\\",\\n                \\\"content\\\": \\\"Sure! They are one of the most mysterious and exciting objects in space.\\\",\\n                \\\"refusal\\\": null\\n            },\\n            \\\"finish_reason\\\": \\\"stop\\\"\\n        }\\n    ],\\n    \\\"usage\\\": {\\n        \\\"prompt_tokens\\\": 17,\\n        \\\"completion_tokens\\\": 959,\\n        \\\"total_tokens\\\": 976,\\n        \\\"prompt_tokens_details\\\": {\\n            \\\"cached_tokens\\\": 0\\n        },\\n        \\\"completion_tokens_details\\\": {\\n            \\\"reasoning_tokens\\\": 64\\n        }\\n    },\\n    \\\"system_fingerprint\\\": \\\"fp_35c19d48ca\\\"\\n}\",\r\n                \"variables\": [\r\n                    {\r\n                        \"path\": \"$.usage.total_tokens\",\r\n                        \"attribute\": {\r\n                            \"name\": \"total_tokens\",\r\n                            \"label\": \"total_tokens\",\r\n                            \"value\": {\r\n                                \"type\": \"INTEGER\"\r\n                            },\r\n                            \"annotations\": [\r\n                                \"RESPONSE_PARAMETER\"\r\n                            ],\r\n                            \"canonicalName\": \"choices[0].totalTokens\"\r\n                        }\r\n                    },\r\n                    {\r\n                        \"path\": \"$.output[0].content[0].text\",\r\n                        \"attribute\": {\r\n                            \"name\": \"content\",\r\n                            \"label\": \"content\",\r\n                            \"value\": {\r\n                                \"type\": \"TEXT\",\r\n                                \"string\": \"Some response from LLM\"\r\n                            },\r\n                            \"annotations\": [\r\n                                \"RESPONSE_PARAMETER\"\r\n                            ],\r\n                            \"canonicalName\": \"choices[0].value\"\r\n                        }\r\n                    },                   \r\n                    {\r\n                        \"path\": \"$.model\",\r\n                        \"attribute\": {\r\n                            \"name\": \"model\",\r\n                            \"label\": \"model\",\r\n                            \"value\": {\r\n                                \"type\": \"TEXT\"\r\n                            },\r\n                            \"annotations\": [\r\n                                \"RESPONSE_PARAMETER\"\r\n                            ],\r\n                            \"canonicalName\": \"model_name\"\r\n                        }\r\n                    }\r\n                ]\r\n            }\r\n        }\r\n    ]\r\n}",
+							"options": {
+								"raw": {
+									"language": "json"
+								}
+							}
+						},
+						"url": "{{host}}/gai/prompttools/v1/custommodel",
+						"description": "### Custom Model Creation\n\nThis API endpoint allows you to create a custom model definition. Once created, this model definition will be an available option when creating a Model Connection in AI Agent Studio.\n\nIn this example, we are creating a model definition for the o1-mini model hosted on OpenAI. NOTE: this example utilizes an API Key as the credential used to authenticate the model in OpenAI.\n\n#### Request Body\n\n- name (string): The name of the custom model.\n    \n- version (string): The version of the custom model.\n    \n- authAction (object): Details about the authentication action.\n    \n    - authType (string): The type of authentication used.\n        \n    - apiAuth (object): Details about API authentication.\n        \n        - location (string): The location of the API key.\n            \n        - keyName (string): The name of the API key.\n            \n- apiType (string): The type of API.\n    \n- actions (array): An array of actions for the custom model.\n    \n    - name (string): The name of the action.\n        \n    - displayName (string): The display name of the action.\n        \n    - description (string): A brief description of the action.\n        \n    - method (string): The HTTP method for the action.\n        \n    - uri (string): The URI for the action.\n        \n    - params (array): Parameters for the action.\n        \n    - request (object): Details about the request.\n        \n        - raw (object): The raw request body.\n            \n            - body (string): The raw request body in JSON format.\n                \n            - variables (array): Variables used in the request.\n                \n    - response (object): Details about the response.\n        \n        - body (string): The JSON response body.\n            \n        - variables (array): Variables in the response body.\n            \n            - path (string): The path of the variable in the response.\n                \n            - attribute (object): Details about the variable.\n                \n                - name (string): The name of the variable.\n                    \n                - label (string): The label of the variable.\n                    \n                - value (object): The value of the variable.\n                    \n                - annotations (array): Annotations for the variable.\n                    \n                - canonicalName (string): The canonical name of the variable.\n                    \n\n#### Response (JSON Schema)\n\n``` json\n{\n    \"type\": \"object\",\n    \"properties\": {\n        \"id\": {\n            \"type\": \"string\"\n        },\n        \"usage\": {\n            \"type\": \"object\",\n            \"properties\": {\n                \"completion_tokens\": {\n                    \"type\": \"integer\"\n                }\n            }\n        }\n    }\n}\n\n ```"
+					},
+					"response": []
+				},
+				{
+					"name": "Create custom model definition - Amazon Bedrock - Anthropic Claude 3.7 (AWS auth)",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test(\"Status code is 200\", function () {\r",
+									"    pm.response.to.have.status(200);\r",
+									"});\r",
+									"\r",
+									"pm.test(\"Validate Vendor Name\", function () {\r",
+									"    var jsonData = pm.response.json();\r",
+									"    pm.expect(jsonData.name).contains(\"Bedrock - Claude2.1\");\r",
+									"});\r",
+									"\r",
+									"pm.test(\"Validate Model Name\", function () {\r",
+									"    var jsonData = pm.response.json();\r",
+									"    pm.expect(jsonData.actions[0].name).to.eql(\"anthropic.claude-v2\");\r",
+									"});"
+								],
+								"type": "text/javascript",
+								"packages": {}
+							}
+						}
+					],
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "X-Authorization",
+								"value": "{{createModelUserToken}}",
+								"type": "text"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\r\n            \"name\": \"AAI Docs Example - Amazon Bedrock\",\r\n            \"version\": \"0\",\r\n            \"authAction\": {\r\n                \"authType\": \"AWS_SIGNATURE_V4\",\r\n                \"awsSignatureV4\": {\r\n                    \"accessKey\": {\r\n                        \"location\": \"header\",\r\n                        \"keyName\": \"aws_sign_access_key\"\r\n                    },\r\n                    \"secretKey\": {\r\n                        \"location\": \"header\",\r\n                        \"keyName\": \"aws_sign_secret_key\"\r\n                    }\r\n                }\r\n            },\r\n            \"apiType\": \"REST\",\r\n            \"actions\": [\r\n                {\r\n                    \"name\": \"us.anthropic.claude-3-7-sonnet-20250219-v1:0\",\r\n                    \"description\": \"Short example\",\r\n                    \"method\": \"POST\",\r\n                    \"uri\": \"arn:aws:bedrock:us-east-1:956125087189:inference-profile/us.anthropic.claude-3-7-sonnet-20250219-v1:0\",\r\n                    \"params\": [\r\n                        {\r\n                            \"type\": \"HEADERS\"\r\n                        },\r\n                        {\r\n                            \"type\": \"QUERY_PARAM\"\r\n                        },\r\n                        {\r\n                            \"type\": \"PATH_PARAM\",\r\n                            \"attribute\": [\r\n                                {\r\n                                    \"name\": \"region\",\r\n                                    \"label\": \"Region\",\r\n                                    \"value\": {\r\n                                        \"type\": \"TEXT\",\r\n                                        \"string\": \"us-east-1\"\r\n                                    }\r\n                                }\r\n                            ]\r\n                        }\r\n                    ],\r\n                    \"request\": {\r\n                        \"raw\": {\r\n                            \"body\": \"{\\\"messages\\\":[{\\\"role\\\":\\\"user\\\",\\\"content\\\":[{\\\"type\\\":\\\"text\\\",\\\"text\\\":\\\"RPA stands for Robotic Process Automation. It refers to software tools that automate routine, repetitive tasks normally performed by humans.\\\"}]}],\\\"anthropic_version\\\":\\\"bedrock-2023-05-31\\\",\\\"max_tokens\\\":300,\\\"temperature\\\":1,\\\"top_k\\\":250,\\\"top_p\\\":0.999}\",\r\n                            \"variables\": [\r\n                                {\r\n                                    \"path\": \"$.max_tokens\",\r\n                                    \"attribute\": {\r\n                                        \"name\": \"max_tokens\",\r\n                                        \"label\": \"max_tokens\",\r\n                                        \"value\": {\r\n                                            \"type\": \"INTEGER\",\r\n                                            \"number\": \"500\"\r\n                                        },\r\n                                        \"annotations\": [\r\n                                            \"MODEL_PARAMETER\"\r\n                                        ]\r\n                                    }\r\n                                },\r\n                                {\r\n                                    \"path\": \"$.messages[0].content\",\r\n                                    \"attribute\": {\r\n                                        \"name\": \"prompt\",\r\n                                        \"label\": \"prompt\",\r\n                                        \"value\": {\r\n                                            \"type\": \"TEXT\"\r\n                                        },\r\n                                        \"annotations\": [\r\n                                            \"PROMPT_QUERY\"\r\n                                        ]\r\n                                    }\r\n                                }\r\n                            ]\r\n                        }\r\n                    },\r\n                    \"response\": {\r\n                        \"body\": \"{\\\"id\\\":\\\"msg_bdrk_01UagzpP4iFCdmVEs9hS5dNb\\\",\\\"type\\\":\\\"message\\\",\\\"role\\\":\\\"assistant\\\",\\\"model\\\":\\\"claude-2.0\\\",\\\"content\\\":[{\\\"type\\\":\\\"text\\\",\\\"text\\\":\\\"Parkour is a training discipline using movement that developed from military obstacle course training. \\\"}],\\\"stop_reason\\\":\\\"end_turn\\\",\\\"stop_sequence\\\":null,\\\"usage\\\":{\\\"input_tokens\\\":13,\\\"output_tokens\\\":294}}\",\r\n                        \"variables\": [\r\n                            {\r\n                                \"path\": \"$.usage.output_tokens\",\r\n                                \"attribute\": {\r\n                                    \"name\": \"completionTokenCount\",\r\n                                    \"label\": \"completionTokenCount\",\r\n                                    \"value\": {\r\n                                        \"type\": \"INTEGER\"\r\n                                    },\r\n                                    \"annotations\": [\r\n                                        \"RESPONSE_PARAMETER\"\r\n                                    ],\r\n                                    \"canonicalName\": \"usage.completion_tokens\"\r\n                                }\r\n                            },\r\n                            {\r\n                                \"path\": \"$.content[0].text\",\r\n                                \"attribute\": {\r\n                                    \"name\": \"content\",\r\n                                    \"label\": \"content\",\r\n                                    \"value\": {\r\n                                        \"type\": \"TEXT\",\r\n                                        \"string\": \"Blackholes are great!\"\r\n                                    },\r\n                                    \"annotations\": [\r\n                                        \"RESPONSE_PARAMETER\"\r\n                                    ],\r\n                                    \"canonicalName\": \"choices[0].value\"\r\n                                }\r\n                            },\r\n                            {\r\n                                \"path\": \"$.usage.input_tokens\",\r\n                                \"attribute\": {\r\n                                    \"name\": \"promptTokenCount\",\r\n                                    \"label\": \"promptTokenCount\",\r\n                                    \"value\": {\r\n                                        \"type\": \"INTEGER\"\r\n                                    },\r\n                                    \"annotations\": [\r\n                                        \"RESPONSE_PARAMETER\"\r\n                                    ],\r\n                                    \"canonicalName\": \"usage.prompt_tokens\"\r\n                                }\r\n                            }\r\n                        ]\r\n                    },\r\n                    \"displayName\": \"Anthropic Claude 3.7\"\r\n                }\r\n            ]\r\n        }",
+							"options": {
+								"raw": {
+									"language": "json"
+								}
+							}
+						},
+						"url": "{{host}}/gai/prompttools/v1/custommodel"
+					},
+					"response": []
+				},
+				{
+					"name": "Create custom model definition - Google Vertex AI Gemini 2.5 Flash (CR Oauth)",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test(\"Status code is 200\", function () {\r",
+									"    pm.response.to.have.status(200);\r",
+									"});\r",
+									"\r",
+									"pm.test(\"Validate Vendor Name\", function () {\r",
+									"    var jsonData = pm.response.json();\r",
+									"    pm.expect(jsonData.name).contains(\"Custom - OAuth2- Geminipro\");\r",
+									"});\r",
+									"\r",
+									"pm.test(\"Validate Model Name\", function () {\r",
+									"    var jsonData = pm.response.json();\r",
+									"    pm.expect(jsonData.actions[0].name).to.eql(\"gemini-1.0-pro\");\r",
+									"});"
+								],
+								"type": "text/javascript",
+								"packages": {}
+							}
+						}
+					],
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "X-Authorization",
+								"value": "{{createModelUserToken}}",
+								"type": "text"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\r\n    \"name\": \"AAI Docs Example - Google Vertex AI\",\r\n    \"version\": \"0\",\r\n    \"authAction\": {\r\n        \"authType\": \"OAUTH2\",\r\n        \"oAuth\": {\r\n            \"location\": \"header\",\r\n            \"keyName\": \"Authorization\",\r\n            \"prefix\": \"Bearer \"\r\n        }\r\n    },\r\n    \"apiType\": \"REST\",\r\n    \"actions\": [\r\n        {\r\n            \"name\": \"gemini-2.5-flash\",\r\n            \"displayName\": \"Gemini 2.5 Flash\",\r\n            \"description\" : \"Gemini 2.5 models are thinking models, capable of reasoning through their thoughts before responding, resulting in enhanced performance and improved accuracy.  Gemini 2.5 Flash: best for balancing reasoning and speed.\",\r\n            \"method\": \"POST\",\r\n            \"uri\": \"https://{region}-aiplatform.googleapis.com/v1/projects/{projectId}/locations/{region}/publishers/google/models/{MODEL_NAME}:generateContent\",\r\n            \"params\": [\r\n                {\r\n                    \"type\": \"HEADERS\"\r\n                },\r\n                {\r\n                    \"type\": \"PATH_PARAM\",\r\n                    \"attribute\": [\r\n                        {\r\n                            \"name\": \"region\",\r\n                            \"label\": \"Region\",\r\n                            \"value\": {\r\n                                \"type\": \"TEXT\",\r\n                                \"string\": \"us-central1\"\r\n                            }\r\n                        },\r\n                        {\r\n                            \"name\": \"projectId\",\r\n                            \"label\": \"Project Id\",\r\n                            \"value\": {\r\n                                \"type\": \"TEXT\",\r\n                                \"string\": \"gcp-aai-genai-tools-dev\"\r\n                            }\r\n                        }\r\n                    ]\r\n                }\r\n            ],\r\n            \"request\": {\r\n                \"raw\": {\r\n                    \"body\": \"{\\\"contents\\\":[{\\\"role\\\":\\\"user\\\",\\\"parts\\\":[{\\\"text\\\":\\\"What is an engine?\\\"}]}],\\\"generationConfig\\\":{\\\"temperature\\\":0.9,\\\"maxOutputTokens\\\":2048,\\\"topP\\\":1,\\\"topK\\\":1}}\",\r\n                    \"variables\": [\r\n                        {\r\n                            \"path\": \"$.generationConfig.maxOutputTokens\",\r\n                            \"attribute\": {\r\n                                \"name\": \"max_tokens\",\r\n                                \"label\": \"max_tokens\",\r\n                                \"value\": {\r\n                                    \"type\": \"INTEGER\",\r\n                                    \"number\": \"500\"\r\n                                },\r\n                                \"annotations\": [\r\n                                    \"REQUEST_PARAMETER\"\r\n                                ]\r\n                            }\r\n                        },\r\n                        {\r\n                            \"path\": \"$.contents[0].parts[0].text\",\r\n                            \"attribute\": {\r\n                                \"name\": \"prompt\",\r\n                                \"label\": \"prompt\",\r\n                                \"value\": {\r\n                                    \"type\": \"TEXT\"\r\n                                },\r\n                                \"annotations\": [\r\n                                    \"PROMPT_QUERY\"\r\n                                ]\r\n                            }\r\n                        },\r\n                        {\r\n                            \"path\": \"$.generationConfig.temperature\",\r\n                            \"attribute\": {\r\n                                \"name\": \"temperature\",\r\n                                \"label\": \"Temperature\",\r\n                                \"value\": {\r\n                                    \"type\": \"DECIMAL\",\r\n                                    \"number\": \"0.7\"\r\n                                },\r\n                                \"annotations\": [\r\n                                    \"MODEL_PARAMETER\"\r\n                                ]\r\n                            }\r\n                        }\r\n                    ]\r\n                }\r\n            },\r\n            \"response\": {\r\n                \"body\": \"{\\\"candidates\\\":[{\\\"content\\\":{\\\"role\\\":\\\"model\\\",\\\"parts\\\":[{\\\"text\\\":\\\"A steam engine is a heat engine that uses the expansion of steam to generate mechanical power.\\\"}]},\\\"finishReason\\\":\\\"STOP\\\"}],\\\"usageMetadata\\\":{\\\"promptTokenCount\\\":6,\\\"candidatesTokenCount\\\":434,\\\"totalTokenCount\\\":440},\\\"modelVersion\\\":\\\"gemini-1.0-pro-001\\\"}\",\r\n                \"variables\": [\r\n                    {\r\n                        \"path\": \"$.usageMetadata.totalTokenCount\",\r\n                        \"attribute\": {\r\n                            \"name\": \"totalTokenCount\",\r\n                            \"label\": \"Total Token Count\",\r\n                            \"value\": {\r\n                                \"type\": \"INTEGER\"\r\n                            },\r\n                            \"annotations\": [\r\n                                \"RESPONSE_PARAMETER\"\r\n                            ],\r\n                            \"canonicalName\": \"choices[0].totalTokens\"\r\n                        }\r\n                    },\r\n                    {\r\n                        \"path\": \"$.candidates[0].content.parts[0].text\",\r\n                        \"attribute\": {\r\n                            \"name\": \"content\",\r\n                            \"label\": \"Content\",\r\n                            \"value\": {\r\n                                \"type\": \"TEXT\",\r\n                                \"string\": \"Some response from LLM\"\r\n                            },\r\n                            \"annotations\": [\r\n                                \"RESPONSE_PARAMETER\"\r\n                            ],\r\n                            \"canonicalName\": \"choices[0].value\"\r\n                        }\r\n                    },\r\n                    {\r\n                        \"path\": \"$.usageMetadata.candidatesTokenCount\",\r\n                        \"attribute\": {\r\n                            \"name\": \"candidatesTokenCount\",\r\n                            \"label\": \"Candidates Token Count\",\r\n                            \"value\": {\r\n                                \"type\": \"INTEGER\"\r\n                            },\r\n                            \"annotations\": [\r\n                                \"RESPONSE_PARAMETER\"\r\n                            ],\r\n                            \"canonicalName\": \"choices[0].completionTokens\"\r\n                        }\r\n                    },\r\n                    {\r\n                        \"path\": \"$.usageMetadata.promptTokenCount\",\r\n                        \"attribute\": {\r\n                            \"name\": \"promptTokenCount\",\r\n                            \"label\": \"Prompt Token Count\",\r\n                            \"value\": {\r\n                                \"type\": \"INTEGER\"\r\n                            },\r\n                            \"annotations\": [\r\n                                \"RESPONSE_PARAMETER\"\r\n                            ],\r\n                            \"canonicalName\": \"choices[0].promptTokens\"\r\n                        }\r\n                    }                    \r\n                ]\r\n            }\r\n        }\r\n    ]\r\n}",
+							"options": {
+								"raw": {
+									"language": "json"
+								}
+							}
+						},
+						"url": "{{host}}/gai/prompttools/v1/custommodel"
+					},
+					"response": []
+				}
+			]
+		},
+		{
+			"name": "List custom model definitions",
+			"item": [
+				{
+					"name": "List custom model definitions",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test(\"Status code is 200\", function () {\r",
+									"    pm.response.to.have.status(200);\r",
+									"});\r",
+									"\r",
+									"pm.test(\"Your test name\", function () {\r",
+									"    var jsonData = pm.response.json();\r",
+									"    pm.expect(jsonData.connectors[0].actions.length).to.be.greaterThan(0);\r",
+									"});"
+								],
+								"type": "text/javascript",
+								"packages": {}
+							}
+						}
+					],
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "X-Authorization",
+								"value": "{{createModelUserToken}}",
+								"type": "text"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{}",
+							"options": {
+								"raw": {
+									"language": "json"
+								}
+							}
+						},
+						"url": "{{host}}/gai/prompttools/v1/custommodel/list",
+						"description": "This endpoint makes an HTTP POST request to retrieve a list of custom model definitions for use within AI Agent Studio. The request payload is empty.\n\n### Response\n\nThe response for this request can be documented as a JSON schema:\n\n``` json\n{\n  \"type\": \"object\",\n  \"properties\": {\n    \"customModels\": {\n      \"type\": \"array\",\n      \"items\": {\n        \"type\": \"object\",\n        \"properties\": {\n          \"id\": {\n            \"type\": \"string\"\n          },\n          \"name\": {\n            \"type\": \"string\"\n          },\n          \"description\": {\n            \"type\": \"string\"\n          },\n          \"createdAt\": {\n            \"type\": \"string\",\n            \"format\": \"date-time\"\n          },\n          \"updatedAt\": {\n            \"type\": \"string\",\n            \"format\": \"date-time\"\n          }\n        }\n      }\n    }\n  }\n}\n\n ```\n\nThis JSON schema describes the structure of the response, which includes an array of custom models with properties such as ID, name, description, creation date, and update date."
+					},
+					"response": []
+				}
+			]
+		},
+		{
+			"name": "Delete custom model definition",
+			"item": [
+				{
+					"name": "Delete custom model definition",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test(\"Status code is 204\", function () {\r",
+									"    pm.response.to.have.status(204);\r",
+									"});"
+								],
+								"type": "text/javascript",
+								"packages": {}
+							}
+						}
+					],
+					"request": {
+						"method": "DELETE",
+						"header": [
+							{
+								"key": "X-Authorization",
+								"value": "{{createModelUserToken}}",
+								"type": "text"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "",
+							"options": {
+								"raw": {
+									"language": "json"
+								}
+							}
+						},
+						"url": "{{host}}/gai/prompttools/v1/custommodel/vendors/AAI Docs Example - Azure OpenAI/models/o3-mini",
+						"description": "### Delete Custom Model Vendor Hugging Face Model\n\nThis endpoint is used to delete a custom model definition within AI Agent Studio.\n\nThe model vendor and model names are passed via the querystring and both must match the values defined within the API.\n\n#### Response\n\nThe response of this request follows the JSON schema below:\n\n``` json\n{\n  \"type\": \"object\",\n  \"properties\": {\n    \"message\": {\n      \"type\": \"string\"\n    }\n  }\n}\n\n ```"
+					},
+					"response": []
+				}
+			]
+		},
+		{
+			"name": "Update model definition",
+			"item": [
+				{
+					"name": "Update (put) User Defined Model",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test(\"Status code is 200\", function () {\r",
+									"    pm.response.to.have.status(200);\r",
+									"});\r",
+									"\r",
+									"pm.test(\"Validate Vendor Name\", function () {\r",
+									"    var jsonData = pm.response.json();\r",
+									"    pm.expect(jsonData.name).contains(\"Test-Update-Api\");\r",
+									"});\r",
+									"\r",
+									"pm.test(\"Validate Model Name\", function () {\r",
+									"    var jsonData = pm.response.json();\r",
+									"    pm.expect(jsonData.actions[0].name).to.eql(\"Meta-Llama-3-8B-Instruct\");\r",
+									"});\r",
+									"\r",
+									"pm.test(\"Validate updated value\", function () {\r",
+									"    var jsonData = pm.response.json();\r",
+									"    pm.expect(jsonData.actions[0].request.raw.variables.find(variable => variable.path === '$.max_tokens').attribute.value.number).to.eql(\"600\");\r",
+									"});\r",
+									""
+								],
+								"type": "text/javascript",
+								"packages": {}
+							}
+						}
+					],
+					"request": {
+						"method": "PUT",
+						"header": [
+							{
+								"key": "X-Authorization",
+								"value": "{{createModelUserToken}}",
+								"type": "text"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\r\n            \"name\": \"AAI Docs Example - Azure OpenAI\",\r\n            \"version\": \"0\",\r\n            \"authAction\": {\r\n                \"authType\": \"CUSTOM_KEYS\",\r\n                \"customKeys\": {\r\n                    \"keys\": [\r\n                        {\r\n                            \"location\": \"header\",\r\n                            \"keyName\": \"Authorization\",\r\n                            \"prefix\": \"Bearer \",\r\n                            \"label\": \"Authorization\"\r\n                        }\r\n                    ]\r\n                }\r\n            },\r\n            \"apiType\": \"REST\",\r\n            \"actions\": [\r\n                {\r\n                    \"name\": \"o3-mini\",\r\n                    \"displayName\": \"o3-mini\",\r\n                    \"description\": \"The o1 and o3 series models are specifically designed to tackle reasoning and problem-solving tasks with increased focus and capability. These models spend more time processing and understanding the user's request, making them exceptionally strong in areas like science, coding, math and similar fields. For example, o1 can be used by healthcare researchers to annotate cell sequencing data, by physicists to generate complicated mathematical formulas needed for quantum optics, and by developers in all fields to build and execute multi-step workflows.\",\r\n                    \"method\": \"POST\",\r\n                    \"uri\": \"https://{project}.openai.azure.com/openai/deployments/{deployment}/chat/completions?api-version={apiVersion}\",\r\n                    \"params\": [\r\n                        {\r\n                            \"type\": \"HEADERS\"\r\n                        },\r\n                        {\r\n                            \"type\": \"QUERY_PARAM\"\r\n                        },\r\n                        {\r\n                            \"type\": \"PATH_PARAM\",\r\n                            \"attribute\": [\r\n                                {\r\n                                    \"name\": \"project\",\r\n                                    \"label\": \"Project\",\r\n                                    \"value\": {\r\n                                        \"type\": \"TEXT\",\r\n                                        \"string\": \"charlieaai-openai2\"\r\n                                    }\r\n                                }\r\n                            ]\r\n                        },\r\n                        {\r\n                            \"type\": \"PATH_PARAM\",\r\n                            \"attribute\": [\r\n                                {\r\n                                    \"name\": \"deployment\",\r\n                                    \"label\": \"Deployment\",\r\n                                    \"value\": {\r\n                                        \"type\": \"TEXT\",\r\n                                        \"string\": \"o3-mini\"\r\n                                    }\r\n                                }\r\n                            ]\r\n                        },\r\n                        {\r\n                            \"type\": \"PATH_PARAM\",\r\n                            \"attribute\": [\r\n                                {\r\n                                    \"name\": \"apiVersion\",\r\n                                    \"label\": \"API Version\",\r\n                                    \"value\": {\r\n                                        \"type\": \"TEXT\",\r\n                                        \"string\": \"2025-01-01-preview\"\r\n                                    }\r\n                                }\r\n                            ]\r\n                        }\r\n                    ],\r\n                    \"request\": {\r\n                        \"raw\": {\r\n                            \"body\": \"{\\\"model\\\": \\\"o3-mini\\\",\\\"messages\\\":[{\\\"role\\\":\\\"system\\\",\\\"content\\\":\\\"system prompt\\\"},{\\\"role\\\":\\\"user\\\",\\\"content\\\":\\\"some prompt query\\\"}],\\\"max_completion_tokens\\\":500}\",\r\n                            \"variables\": [\r\n                                {\r\n                                    \"path\": \"$.max_completion_tokens\",\r\n                                    \"attribute\": {\r\n                                        \"name\": \"max_completion_tokens\",\r\n                                        \"label\": \"Max tokens\",\r\n                                        \"value\": {\r\n                                            \"type\": \"INTEGER\",\r\n                                            \"number\": \"100000\"\r\n                                        },\r\n                                        \"annotations\": [\r\n                                            \"MODEL_PARAMETER\"\r\n                                        ],\r\n                                        \"canonicalName\": \"choices[0].completionTokens\"\r\n                                    }\r\n                                },\r\n                                {\r\n                                    \"path\": \"$.messages[1].content\",\r\n                                    \"attribute\": {\r\n                                        \"name\": \"prompt\",\r\n                                        \"label\": \"prompt\",\r\n                                        \"value\": {\r\n                                            \"type\": \"TEXT\"\r\n                                        },\r\n                                        \"annotations\": [\r\n                                            \"PROMPT_QUERY\"\r\n                                        ]\r\n                                    }\r\n                                },\r\n                                {\r\n                                    \"path\": \"$.messages[0].content\",\r\n                                    \"attribute\": {\r\n                                        \"name\": \"systemPrompt\",\r\n                                        \"label\": \"System Prompt\",\r\n                                        \"value\": {\r\n                                            \"type\": \"TEXT\"\r\n                                        },\r\n                                        \"annotations\": [\r\n                                            \"SYSTEM_PROMPT_MESSAGE\"\r\n                                        ]\r\n                                    }\r\n                                }\r\n                            ]\r\n                        }\r\n                    },\r\n                    \"response\": {\r\n                        \"body\": \"{\\n    \\\"id\\\": \\\"chatcmpl-APwQdLa9WCQAdZg0dO5OjGr2ER4sX\\\",\\n    \\\"object\\\": \\\"chat.completion\\\",\\n    \\\"created\\\": 1730746163,\\n    \\\"model\\\": \\\"o3-mini-2025-01-31\\\",\\n    \\\"choices\\\": [\\n        {\\n            \\\"index\\\": 0,\\n            \\\"message\\\": {\\n                \\\"role\\\": \\\"assistant\\\",\\n                \\\"content\\\": \\\"Sure! They are one of the most mysterious and exciting objects in space.\\\",\\n                \\\"refusal\\\": null\\n            },\\n            \\\"finish_reason\\\": \\\"stop\\\"\\n        }\\n    ],\\n    \\\"usage\\\": {\\n        \\\"prompt_tokens\\\": 17,\\n        \\\"completion_tokens\\\": 959,\\n        \\\"total_tokens\\\": 976,\\n        \\\"prompt_tokens_details\\\": {\\n            \\\"cached_tokens\\\": 0\\n        },\\n        \\\"completion_tokens_details\\\": {\\n            \\\"reasoning_tokens\\\": 64\\n        }\\n    },\\n    \\\"system_fingerprint\\\": \\\"fp_35c19d48ca\\\"\\n}\",\r\n                        \"variables\": [\r\n                            {\r\n                                \"path\": \"$.usage.completion_tokens\",\r\n                                \"attribute\": {\r\n                                    \"name\": \"completion_tokens\",\r\n                                    \"label\": \"completion_tokens\",\r\n                                    \"value\": {\r\n                                        \"type\": \"INTEGER\"\r\n                                    },\r\n                                    \"annotations\": [\r\n                                        \"RESPONSE_PARAMETER\"\r\n                                    ],\r\n                                    \"canonicalName\": \"choices[0].completionTokens\"\r\n                                }\r\n                            },\r\n                            {\r\n                                \"path\": \"$.choices[0].message.content\",\r\n                                \"attribute\": {\r\n                                    \"name\": \"content\",\r\n                                    \"label\": \"content\",\r\n                                    \"value\": {\r\n                                        \"type\": \"TEXT\",\r\n                                        \"string\": \"Some response from LLM\"\r\n                                    },\r\n                                    \"annotations\": [\r\n                                        \"RESPONSE_PARAMETER\"\r\n                                    ],\r\n                                    \"canonicalName\": \"choices[0].value\"\r\n                                }\r\n                            },\r\n                            {\r\n                                \"path\": \"$.model\",\r\n                                \"attribute\": {\r\n                                    \"name\": \"model\",\r\n                                    \"label\": \"model\",\r\n                                    \"value\": {\r\n                                        \"type\": \"TEXT\"\r\n                                    },\r\n                                    \"annotations\": [\r\n                                        \"RESPONSE_PARAMETER\"\r\n                                    ],\r\n                                    \"canonicalName\": \"model_name\"\r\n                                }\r\n                            },\r\n                            {\r\n                                \"path\": \"$.usage.prompt_tokens\",\r\n                                \"attribute\": {\r\n                                    \"name\": \"prompt_tokens\",\r\n                                    \"label\": \"prompt_tokens\",\r\n                                    \"value\": {\r\n                                        \"type\": \"INTEGER\"\r\n                                    },\r\n                                    \"annotations\": [\r\n                                        \"RESPONSE_PARAMETER\"\r\n                                    ],\r\n                                    \"canonicalName\": \"choices[0].promptTokens\"\r\n                                }\r\n                            },\r\n                            {\r\n                                \"path\": \"$.usage.total_tokens\",\r\n                                \"attribute\": {\r\n                                    \"name\": \"total_tokens\",\r\n                                    \"label\": \"total_tokens\",\r\n                                    \"value\": {\r\n                                        \"type\": \"INTEGER\"\r\n                                    },\r\n                                    \"annotations\": [\r\n                                        \"RESPONSE_PARAMETER\"\r\n                                    ],\r\n                                    \"canonicalName\": \"choices[0].totalTokens\"\r\n                                }\r\n                            }\r\n                        ]\r\n                    }\r\n                }\r\n            ]\r\n        }",
+							"options": {
+								"raw": {
+									"language": "json"
+								}
+							}
+						},
+						"url": "{{host}}/gai/prompttools/v1/custommodel"
+					},
+					"response": []
+				}
+			]
+		}
+	]
+}

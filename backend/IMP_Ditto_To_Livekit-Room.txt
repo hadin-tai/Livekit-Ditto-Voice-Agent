@@ -1,0 +1,794 @@
+Yes. I did a deeper check of the current LiveKit documentation, including the **virtual avatar architecture, custom avatar workers, `AvatarRunner`, `DataStreamAudioOutput`, and frontend handling**.
+
+And there is an important conclusion:
+
+## Short answer
+
+**I recommend fixing the current Ditto audio/video timing problem before treating the LiveKit frontend integration as complete.**
+
+But **you do NOT need to completely stop all LiveKit video-publishing work**.
+
+The reason is that your current behavior:
+
+> Cartesia speaks → Cartesia finishes → Ditto starts speaking
+
+is an **audio/video synchronization and latency problem inside the Ditto pipeline**, not a frontend rendering problem.
+
+If we publish the current Ditto frames to LiveKit right now, the frontend will simply show the same delayed avatar. Connecting it to WebRTC will not magically make Ditto start processing earlier.
+
+However, there is a very important architectural point from LiveKit's documentation that changes **how we should implement Phase 2**.
+
+---
+
+# 1. What LiveKit actually does with avatars
+
+I checked the current LiveKit avatar documentation.
+
+LiveKit's intended architecture is:
+
+```text
+                    AgentSession
+                         │
+                         │ agent audio
+                         ▼
+                 Avatar Worker
+                         │
+              ┌──────────┴──────────┐
+              │                     │
+              ▼                     ▼
+        Audio Track            Video Track
+              │                     │
+              └──────────┬──────────┘
+                         ▼
+                    LiveKit Room
+                         │
+                         ▼
+                     Frontend
+```
+
+The avatar is **not simply a video file/stream attached to the frontend**.
+
+LiveKit says that the avatar plugin creates a **separate participant** in the room, and that participant publishes synchronized audio + video tracks. ([LiveKit Docs][1])
+
+This is exactly why you previously saw:
+
+```text
+anam-avatar-agent
+```
+
+as a participant.
+
+That behavior was correct.
+
+LiveKit explicitly describes the avatar as a **secondary participant / avatar worker**. ([LiveKit Docs][1])
+
+---
+
+# 2. This is extremely important for our Ditto implementation
+
+We should therefore **not think of Phase 2 as simply:**
+
+```text =
+Ditto
+ ↓
+VideoTrack
+ ↓
+Frontend
+```
+
+Instead, we should think:
+
+```text
+                    LiveKit Agent
+                         │
+                    AgentSession
+                         │
+                    Cartesia TTS
+                         │
+                         ▼
+                  Avatar audio path
+                         │
+                         ▼
+                 ┌───────────────┐
+                 │ Ditto Worker  │
+                 │               │
+                 │ Audio → Ditto │
+                 │      ↓        │
+                 │ Video frames │
+                 └───────┬───────┘
+                         │
+                 publishes to room
+                    ┌────┴────┐
+                    ▼         ▼
+                  Audio     Video
+                    │         │
+                    └────┬────┘
+                         ▼
+                   LiveKit Room
+                         │
+                         ▼
+                     Frontend
+```
+
+That is much closer to the architecture LiveKit itself recommends.
+
+---
+
+# 3. And LiveKit has already provided a mechanism for custom avatars
+
+This is the really useful part.
+
+LiveKit's documentation has a specific section called **Custom avatar workers**.
+
+It says custom avatar workers can use `AvatarRunner`, which is specifically described as a worker that:
+
+> generates synchronized avatar video based on received audio. ([LiveKit Docs][2])
+
+The `AvatarRunner` architecture contains:
+
+```text
+AudioReceiver
+     │
+     ▼
+VideoGenerator
+     │
+     ▼
+AV synchronizer
+     │
+     ▼
+Audio + Video tracks
+     │
+     ▼
+LiveKit room
+```
+
+The reference implementation actually creates:
+
+```python
+LocalAudioTrack
+LocalVideoTrack
+```
+
+and publishes them into the room. ([LiveKit Docs][2])
+
+So LiveKit already has infrastructure specifically intended for what we are trying to build.
+
+---
+
+# 4. Therefore, our next architecture should NOT be a random custom implementation
+
+We should leverage LiveKit's avatar architecture.
+
+Our Ditto integration should eventually become something conceptually like:
+
+```text
+Cartesia
+   │
+   ▼
+AgentSession audio output
+   │
+   ▼
+Ditto Avatar Worker
+   │
+   ├── receives audio
+   │
+   ├── feeds audio to Ditto
+   │
+   ├── receives Ditto frames
+   │
+   ├── synchronizes audio + video
+   │
+   └── publishes both
+           │
+           ▼
+      LiveKit Room
+           │
+           ├── Audio
+           └── Video
+                │
+                ▼
+             Frontend
+```
+
+This is much better than:
+
+```text
+Cartesia → LiveKit audio
+
+Cartesia → Ditto → video
+```
+
+because in the second architecture the audio and video are controlled by two independent pipelines.
+
+---
+
+# 5. Now to your main question: should we fix the delay first?
+
+### Yes.
+
+Your current situation is:
+
+```text
+Cartesia starts
+       │
+       ├──────────────► LiveKit audio
+       │
+       └──────────────► Ditto
+                         │
+                         │ buffering/inference
+                         ▼
+                    Ditto frames
+                         │
+                         ▼
+                   OpenCV window
+```
+
+And you are observing:
+
+```text
+Cartesia:
+████████████████████
+
+Ditto:
+                    ████████████████
+```
+
+What we actually want is:
+
+```text
+Cartesia:
+████████████████████
+
+Ditto:
+████████████████████
+```
+
+with the mouth movements corresponding to the audio.
+
+---
+
+# 6. Connecting Ditto to LiveKit won't solve this
+
+Suppose we immediately publish your current OpenCV frames:
+
+```text
+Ditto
+  ↓
+VideoFrame
+  ↓
+LiveKit VideoTrack
+  ↓
+Frontend
+```
+
+The result would probably be:
+
+```text
+Frontend audio:
+████████████████████
+
+Frontend avatar:
+                    ████████████████
+```
+
+The frontend isn't responsible for generating the lip-sync.
+
+Ditto generates the lip movement from the audio.
+
+So if Ditto receives the audio too late, or processes it in a batch that causes a large delay, the frontend will faithfully display that delayed output.
+
+---
+
+# 7. But there is an even bigger issue
+
+Your current Ditto pipeline appears to be **batching/buffering too aggressively**.
+
+From our existing integration investigation, LiveKit gives us streaming `SynthesizedAudio` chunks, while Ditto needs its own chunking/windowing.
+
+We already established that we should do:
+
+```text
+Cartesia chunk
+      ↓
+Audio buffer
+      ↓
+enough samples?
+      ↓
+Ditto-sized chunk
+      ↓
+run_chunk()
+      ↓
+frames
+```
+
+rather than:
+
+```text
+Cartesia chunk
+      ↓
+wait for everything
+      ↓
+Ditto
+```
+
+Your uploaded integration notes explicitly establish this buffering architecture and that `is_final=True` indicates the end of a synthesized speech segment.  
+
+So the fact that Ditto currently waits until the agent finishes speaking strongly suggests that our current implementation is still behaving too much like the offline/full-segment pipeline.
+
+---
+
+# 8. What we should achieve before frontend integration
+
+I would define the milestone like this:
+
+### Current
+
+```text
+Cartesia
+   ↓
+audio chunks
+   ↓
+Ditto
+   ↓
+OpenCV
+
+❌ Ditto begins after speech ends
+```
+
+### Milestone 1.5
+
+```text
+Cartesia
+   ↓
+audio chunk 1
+   ↓
+Ditto
+   ↓
+video frames
+
+audio chunk 2
+   ↓
+Ditto
+   ↓
+video frames
+
+audio chunk 3
+   ↓
+Ditto
+   ↓
+video frames
+
+...
+```
+
+So:
+
+```text
+Cartesia audio
+████████████████████████
+
+Ditto frames
+████████████████████████
+```
+
+Even if Ditto is only producing **5–6 FPS**, it should start producing frames while Cartesia is still speaking.
+
+That is the important thing.
+
+---
+
+# 9. Then Phase 2: LiveKit
+
+Once we have:
+
+```text
+Cartesia
+    ↓
+Ditto
+    ↓
+continuous frames while speaking
+    ↓
+OpenCV
+```
+
+we move to:
+
+```text
+Cartesia
+    ↓
+Ditto
+    ↓
+continuous frames
+    ↓
+LiveKit VideoSource
+    ↓
+LiveKit VideoTrack
+    ↓
+Room
+    ↓
+Frontend
+```
+
+But I would actually go one step further and use LiveKit's **custom avatar-worker architecture** rather than simply attaching a video track to your existing agent participant.
+
+---
+
+# 10. Why separate participant?
+
+This is exactly what you experienced with Anam.
+
+Your room had:
+
+```text
+Human participant
+       │
+       │
+Voice Agent participant
+       │
+       │
+Anam Avatar participant
+```
+
+LiveKit's current documentation confirms that this is intentional. The avatar worker joins as a secondary participant and publishes the synchronized audio/video. ([LiveKit Docs][1])
+
+For Ditto, we should eventually have something like:
+
+```text
+LiveKit Room
+
+├── user-xxxxx
+│      └── microphone
+│
+├── voice-agent
+│      └── agent logic
+│
+└── ditto-avatar-agent
+       ├── audio track
+       └── video track
+```
+
+This is a clean architecture.
+
+---
+
+# 11. And there is a very useful frontend benefit
+
+Your current frontend already searches for:
+
+```text
+anam-avatar-agent
+```
+
+and renders its video.
+
+But LiveKit's newer recommended architecture provides a cleaner way.
+
+The avatar worker is identified as an agent participant with:
+
+```text
+lk.publish_on_behalf
+```
+
+pointing to the actual agent participant. ([LiveKit Docs][1])
+
+And LiveKit's React `useVoiceAssistant()` can expose:
+
+```text
+agent
+audioTrack
+videoTrack
+```
+
+where the audio/video tracks correspond to the avatar worker. ([LiveKit Docs][1])
+
+So eventually we can make your frontend much cleaner:
+
+```text
+useVoiceAssistant()
+       │
+       ├── agent
+       ├── audioTrack
+       └── videoTrack
+```
+
+instead of hard-coding:
+
+```javascript
+identity === "anam-avatar-agent"
+```
+
+---
+
+# 12. Another very important thing: audio should move to the avatar worker
+
+This is where our current Phase 1 architecture will need to evolve.
+
+Your current Phase 1 architecture is intentionally:
+
+```text
+SynthesizedAudio
+       │
+       ├──────────► LiveKit audio
+       │
+       └──────────► Ditto
+```
+
+That was the correct architecture for proving:
+
+> "Can we successfully feed Cartesia audio into Ditto?"
+
+And we've successfully proven that. Your uploaded integration notes explicitly define this as the Phase-1 fan-out architecture. 
+
+But the **final avatar architecture** should be more like:
+
+```text
+AgentSession
+      │
+      ▼
+Avatar Worker
+      │
+      ├── Audio
+      │
+      └── Video
+           │
+           ▼
+      LiveKit Room
+```
+
+LiveKit's avatar documentation specifically says the agent session sends its audio output to the avatar worker **instead of directly to the room**, and the avatar worker publishes synchronized audio + video. ([LiveKit Docs][1])
+
+That is important for proper synchronization.
+
+---
+
+# 13. Why this is better for lip-sync
+
+Imagine:
+
+```text
+Cartesia audio timestamp:
+0ms ──────────────── 2000ms
+```
+
+Ditto generates:
+
+```text
+Frame 1 → 0ms
+Frame 2 → 40ms
+Frame 3 → 80ms
+...
+```
+
+The avatar worker can maintain the relationship:
+
+```text
+Audio timeline
+      │
+      ├── 0ms
+      ├── 40ms
+      ├── 80ms
+      ├── 120ms
+      └── ...
+             │
+             ▼
+       Ditto video
+```
+
+LiveKit's `AvatarRunner` exists specifically around this synchronized audio/video concept. Its documentation describes it as generating synchronized avatar video based on received audio. ([LiveKit Docs][2])
+
+That's much closer to what you ultimately need.
+
+---
+
+# 14. One more thing from LiveKit that matters for latency
+
+LiveKit's custom avatar worker documentation has a mechanism called:
+
+```text
+lk.playback_started
+```
+
+A custom avatar worker can tell the agent session when audio playback has **actually started** on the worker.
+
+LiveKit provides:
+
+```text
+DataStreamAudioOutput
+```
+
+with:
+
+```text
+wait_playback_start=True
+```
+
+for this purpose. ([LiveKit Docs][1])
+
+That means LiveKit is explicitly designed to account for the fact that:
+
+```text
+Agent generates audio
+        ↓
+Avatar receives audio
+        ↓
+Avatar processes audio
+        ↓
+Avatar actually starts playback
+```
+
+are not necessarily instantaneous.
+
+This will be very useful once we implement the real Ditto worker.
+
+---
+
+# 15. So I recommend this exact development order
+
+### STEP 1 — DONE ✅
+
+```text
+LiveKit Voice Agent
+       ↓
+Cartesia
+       ↓
+Ditto
+       ↓
+OpenCV
+```
+
+We've completed this.
+
+---
+
+### STEP 2 — FIX STREAMING BEHAVIOR 🔴
+
+Before frontend:
+
+```text
+Cartesia starts speaking
+       ↓
+Ditto starts processing immediately
+       ↓
+Ditto continuously generates frames
+       ↓
+OpenCV shows them while audio is still playing
+```
+
+**This is our immediate next task.**
+
+Not FPS optimization yet.
+
+Not frontend yet.
+
+First solve:
+
+> Why is Ditto waiting until the complete Cartesia response before generating/displaying its frames?
+
+---
+
+### STEP 3 — BUILD DITTO AVATAR WORKER
+
+Move from:
+
+```text
+DittoAdapter
+```
+
+to something conceptually based around:
+
+```text
+Custom Avatar Worker
+        +
+AvatarRunner / LiveKit avatar synchronization
+```
+
+depending on exactly how well Ditto's `StreamSDK` fits the `VideoGenerator` interface.
+
+---
+
+### STEP 4 — PUBLISH AUDIO + VIDEO
+
+The worker publishes:
+
+```text
+Ditto Avatar Participant
+
+Audio Track
+Video Track
+```
+
+to LiveKit.
+
+---
+
+### STEP 5 — FRONTEND
+
+Frontend sees:
+
+```text
+voice-agent
+ditto-avatar-agent
+```
+
+and renders the avatar's video track.
+
+Ideally we move away from:
+
+```javascript
+"anam-avatar-agent"
+```
+
+and use LiveKit's avatar-worker identification / `useVoiceAssistant()` approach. ([LiveKit Docs][1])
+
+---
+
+### STEP 6 — PERFORMANCE OPTIMIZATION
+
+Only after everything works:
+
+```text
+5–6 FPS
+```
+
+then investigate:
+
+```text
+GPU utilization
+VRAM
+Ditto inference latency
+chunk size
+frame generation
+TensorRT
+CUDA
+frame dropping
+buffer size
+```
+
+---
+
+# Final recommendation
+
+So if you ask me:
+
+> **Should we first fix the fact that Ditto starts speaking only after Cartesia finishes, or should we connect Ditto to LiveKit frontend first?**
+
+My answer is:
+
+**Fix the streaming/synchronization behavior first.**
+
+But don't interpret that as "don't touch LiveKit yet."
+
+We should **design the LiveKit connection now**, because the documentation gives us a very clear target architecture:
+
+```text
+                 LIVEKIT ROOM
+                      │
+          ┌───────────┴───────────┐
+          │                       │
+      User participant      Ditto Avatar Worker
+                                  │
+                          ┌───────┴───────┐
+                          │               │
+                       Audio           Video
+                          │               │
+                          └───────┬───────┘
+                                  │
+                             Frontend
+```
+
+And LiveKit specifically supports **custom avatar workers** for this use case. ([LiveKit Docs][1])
+
+The key distinction is:
+
+**Phase 1:** prove `Cartesia → Ditto` works — **DONE**.
+
+**Phase 2A:** make `Cartesia → Ditto` genuinely streaming and synchronized — **NEXT**.
+
+**Phase 2B:** put that Ditto pipeline inside a LiveKit avatar-worker architecture and publish synchronized audio/video — **AFTER 2A**.
+
+**Phase 2C:** render the avatar participant in your React frontend.
+
+That order will save us a lot of debugging, because otherwise we'd be debugging **Ditto buffering + WebRTC publishing + frontend rendering + audio/video synchronization simultaneously**.
+
+[1]: https://docs.livekit.io/agents/models/avatar/ "Virtual avatar models overview | LiveKit Documentation"
+[2]: https://docs.livekit.io/reference/python/livekit/agents/voice/avatar/?utm_source=chatgpt.com "livekit.agents.voice.avatar API documentation"

@@ -1,0 +1,1738 @@
+Yes. At this point you have enough information to create the **implementation plan**. The important thing now is to freeze the technical facts we have already established so we don't make architectural decisions based on assumptions.
+
+# Ditto + LiveKit + Cartesia Integration — Technical Reference
+
+## 1. Final target architecture
+
+Your current voice agent is:
+
+```text
+User Microphone
+      │
+      ▼
+   LiveKit Room
+      │
+      ▼
+Speechmatics STT
+      │
+      ▼
+ Transcript
+      │
+      ▼
+Custom HuggingFace LLM
+      │
+      ▼
+Cartesia TTS
+      │
+      ▼
+LiveKit TTS Streaming Layer
+      │
+      ▼
+SynthesizedAudio
+      │
+      ├──────────────► Normal LiveKit Audio Playback
+      │
+      ▼
+   Ditto Adapter
+      │
+      ▼
+Ditto StreamSDK
+      │
+      ▼
+Video Frames
+      │
+      ▼
+Phase-1: Local/OpenCV display
+```
+
+Eventually, the last part becomes:
+
+```text
+Ditto Video Frames
+      │
+      ▼
+LiveKit Video Track / WebRTC
+      │
+      ▼
+Frontend
+      │
+      ▼
+Avatar
+```
+
+But **frontend/WebRTC video publishing is not part of the first integration phase**.
+
+---
+
+# 2. Current project stack
+
+Your worker currently contains:
+
+| Component        | Technology                 |
+| ---------------- | -------------------------- |
+| Voice transport  | LiveKit                    |
+| STT              | Speechmatics               |
+| LLM              | Custom HuggingFace `LLM`   |
+| TTS              | Cartesia                   |
+| VAD              | Silero                     |
+| Current avatar   | Anam                       |
+| New avatar       | Ditto TalkingHead          |
+| Backend language | Python                     |
+| GPU              | RTX 3050 Laptop, 4 GB VRAM |
+
+The relevant initialization is:
+
+```python
+session = AgentSession(
+    stt=stt,
+    llm=llm_instance,
+    tts=cartesia.TTS(
+        voice=os.getenv("CARTESIA_VOICE_ID"),
+    ),
+    vad=silero.VAD.load(),
+    preemptive_generation=False,
+)
+```
+
+So Cartesia is already being used as the `AgentSession` TTS provider.
+
+---
+
+# 3. LiveKit's TTS data model
+
+The critical object is:
+
+```python
+SynthesizedAudio
+```
+
+In the LiveKit Agents version you inspected, it is effectively:
+
+```python
+@dataclass
+class SynthesizedAudio:
+    frame: rtc.AudioFrame
+    request_id: str
+    is_final: bool = False
+    segment_id: str = ""
+    delta_text: str = ""
+```
+
+Therefore:
+
+```text
+SynthesizedAudio
+│
+├── frame
+├── request_id
+├── segment_id
+├── is_final
+└── delta_text
+```
+
+The most important property is:
+
+```python
+ev.frame
+```
+
+because this is a:
+
+```python
+rtc.AudioFrame
+```
+
+---
+
+# 4. `rtc.AudioFrame`
+
+The relevant fields are:
+
+```python
+frame.data
+frame.sample_rate
+frame.num_channels
+frame.samples_per_channel
+frame.duration
+```
+
+Conceptually:
+
+```text
+rtc.AudioFrame
+│
+├── data
+├── sample_rate
+├── num_channels
+├── samples_per_channel
+└── duration
+```
+
+The actual audio is in:
+
+```python
+frame.data
+```
+
+and can be converted to bytes with:
+
+```python
+frame.data.tobytes()
+```
+
+However, **Ditto should not blindly consume those bytes yet**, because your existing Ditto pipeline expects a NumPy floating-point audio array. The conversion needs to be done correctly.
+
+---
+
+# 5. What Cartesia is actually producing
+
+Your runtime logs confirmed that Cartesia is using a streaming WebSocket connection.
+
+Example:
+
+```text
+Established new Cartesia TTS WebSocket connection
+cartesia_request_id: ...
+```
+
+This means the TTS response is not a complete WAV/MP3 file.
+
+It is a stream.
+
+Conceptually:
+
+```text
+Cartesia
+   │
+   ├── chunk 1
+   ├── chunk 2
+   ├── chunk 3
+   ├── chunk 4
+   ├── ...
+   └── final chunk
+```
+
+---
+
+# 6. Confirmed Cartesia output format
+
+Your intercepted LiveKit audio has consistently shown:
+
+```text
+sample_rate = 16000 Hz
+num_channels = 1
+```
+
+Therefore the audio reaching the interception point is:
+
+```text
+16,000 Hz
+Mono
+PCM audio
+```
+
+The data itself is:
+
+```text
+<class 'memoryview'>
+```
+
+So:
+
+```python
+ev.frame.data
+```
+
+is an in-memory audio buffer.
+
+It is **not**:
+
+* an MP3 file
+* a WAV file
+* a URL
+* a file path
+* base64 audio
+
+It is already decoded audio data represented by the LiveKit `AudioFrame`.
+
+---
+
+# 7. Actual chunk sizes observed
+
+Your logs showed chunks such as:
+
+```text
+160 samples
+640 samples
+1280 samples
+2560 samples
+3200 samples
+```
+
+At 16 kHz:
+
+```text
+160 samples  = 10 ms
+640 samples  = 40 ms
+1280 samples = 80 ms
+2560 samples = 160 ms
+3200 samples = 200 ms
+```
+
+Therefore **chunk duration is variable**.
+
+This is extremely important.
+
+We should **not** implement Ditto assuming:
+
+```text
+every SynthesizedAudio event = fixed 40 ms
+```
+
+because the actual events can contain different numbers of samples.
+
+---
+
+# 8. `segment_id`
+
+This is one of the most useful fields.
+
+For one assistant response you observed:
+
+```text
+segment_id = 680e59643e7d
+```
+
+repeated across many chunks.
+
+For example:
+
+```text
+segment_id = 680e59643e7d
+chunk 1
+chunk 2
+chunk 3
+chunk 4
+...
+chunk N
+is_final=True
+```
+
+Therefore:
+
+```text
+segment_id
+     │
+     ├── audio chunk
+     ├── audio chunk
+     ├── audio chunk
+     └── final audio chunk
+```
+
+We can use this to associate chunks with one generated speech segment.
+
+---
+
+# 9. `request_id`
+
+You also observed a consistent:
+
+```text
+request_id
+```
+
+for the TTS request.
+
+Conceptually:
+
+```text
+request_id
+    │
+    └── Cartesia TTS request
+
+segment_id
+    │
+    └── particular synthesized segment
+```
+
+For the integration, `segment_id` is particularly useful for managing Ditto's current audio stream.
+
+---
+
+# 10. `is_final`
+
+Each `SynthesizedAudio` event contains:
+
+```python
+ev.is_final
+```
+
+Typical sequence:
+
+```text
+chunk 1 → False
+chunk 2 → False
+chunk 3 → False
+chunk 4 → False
+...
+final chunk → True
+```
+
+Your final chunk was observed as:
+
+```text
+samples_per_channel = 160
+duration = 0.01
+is_final = True
+```
+
+So:
+
+```python
+is_final == True
+```
+
+means the current synthesized speech segment has ended.
+
+This is important for telling the Ditto adapter:
+
+```text
+No more audio belongs to this segment.
+```
+
+---
+
+# 11. LiveKit internal audio pipeline
+
+The internal architecture we investigated is approximately:
+
+```text
+Cartesia TTS
+      │
+      ▼
+Cartesia TTS streaming implementation
+      │
+      ▼
+AudioEmitter
+      │
+      ▼
+AudioEmitter._main_task()
+      │
+      ▼
+rtc.AudioFrame
+      │
+      ▼
+SynthesizedAudio
+      │
+      ▼
+LiveKit playback
+```
+
+The important internal method we found is:
+
+```python
+AudioEmitter.push(data)
+```
+
+The TTS implementation pushes generated audio into the emitter:
+
+```python
+output_emitter.push(audio_bytes)
+```
+
+The emitter then creates `AudioFrame` objects.
+
+Eventually those become:
+
+```python
+SynthesizedAudio(...)
+```
+
+---
+
+# 12. Do NOT modify LiveKit's `tts.py`
+
+We explicitly determined that modifying:
+
+```text
+site-packages/livekit/agents/tts/tts.py
+```
+
+is **not** the correct architecture.
+
+Reasons:
+
+* third-party package modification
+* package updates overwrite changes
+* deployment becomes difficult
+* Ditto becomes coupled to LiveKit internals
+* maintenance becomes harder
+
+The correct architecture is:
+
+```text
+LiveKit TTS
+      │
+      ▼
+Application-level interception
+      │
+      ├── normal LiveKit playback
+      │
+      └── Ditto
+```
+
+---
+
+# 13. Clean application-level interception
+
+For your actual project, the clean interception should be implemented around the Cartesia TTS stream rather than modifying LiveKit internals.
+
+The relevant application-level pattern is:
+
+```python
+tts_stream = cartesia_tts.stream(...)
+```
+
+and then consume:
+
+```python
+async for ev in tts_stream:
+    ...
+```
+
+The critical object is:
+
+```python
+ev
+```
+
+where:
+
+```python
+ev.frame
+```
+
+contains the synthesized audio.
+
+Your interception logic should therefore conceptually be:
+
+```python
+async for ev in tts_stream:
+
+    frame = ev.frame
+
+    # inspect/copy audio
+    audio_data = frame.data
+
+    # send/copy to Ditto adapter
+
+    # IMPORTANT:
+    # return/pass the original event onward
+    # so LiveKit audio playback continues normally
+```
+
+This creates a **fan-out architecture**:
+
+```text
+                    SynthesizedAudio
+                           │
+             ┌─────────────┴─────────────┐
+             │                           │
+             ▼                           ▼
+      LiveKit Playback             Ditto Adapter
+                                         │
+                                         ▼
+                                    Ditto Video
+```
+
+This is the architecture we want.
+
+---
+
+# 14. Important distinction: Cartesia vs LiveKit interception
+
+We should not intercept at:
+
+```text
+Cartesia WebSocket
+```
+
+because that would couple your implementation to Cartesia's internal WebSocket protocol.
+
+Instead:
+
+```text
+Cartesia
+   ↓
+LiveKit Cartesia plugin
+   ↓
+LiveKit TTS streaming abstraction
+   ↓
+SynthesizedAudio
+   ↓
+⭐ APPLICATION INTERCEPTION
+```
+
+This is cleaner because your Ditto adapter only needs to understand LiveKit's synthesized audio representation.
+
+---
+
+# 15. Your existing runtime evidence
+
+You already have runtime logs showing something equivalent to:
+
+```text
+[CARTESIA → SYNTHESIZED AUDIO]
+```
+
+with:
+
+```text
+request_id
+segment_id
+is_final
+sample_rate
+num_channels
+samples_per_channel
+duration
+data
+```
+
+That means the actual runtime audio has already been successfully observed at the correct abstraction layer.
+
+This is a very important milestone.
+
+---
+
+# 16. Ditto's expected audio input
+
+Your `live_ditto_test.py` gives us the other half of the integration.
+
+Ditto currently loads audio using:
+
+```python
+audio, sr = librosa.core.load(
+    AUDIO_PATH,
+    sr=16000
+)
+```
+
+Therefore the resulting representation is:
+
+```text
+NumPy array
+float32
+16 kHz
+mono
+```
+
+Then Ditto calculates:
+
+```python
+num_f = math.ceil(len(audio) / 16000 * 25)
+```
+
+This establishes the expected temporal relationship:
+
+```text
+16,000 audio samples / second
+        ↓
+25 video frames / second
+```
+
+---
+
+# 17. Ditto's actual online API
+
+Your existing working implementation uses:
+
+```python
+from stream_pipeline_online import StreamSDK
+```
+
+Then:
+
+```python
+SDK = StreamSDK(CFG_PKL, DATA_ROOT)
+```
+
+where:
+
+```python
+CFG_PKL = checkpoints/ditto_cfg/v0.4_hubert_cfg_pytorch.pkl
+```
+
+and:
+
+```python
+DATA_ROOT = checkpoints/ditto_pytorch
+```
+
+---
+
+# 18. Ditto initialization
+
+You currently initialize:
+
+```python
+SDK = StreamSDK(CFG_PKL, DATA_ROOT)
+```
+
+Then configure the source avatar:
+
+```python
+SDK.setup(
+    SOURCE_PATH,
+    OUTPUT_PATH,
+    online_mode=True,
+    emo=4
+)
+```
+
+where:
+
+```python
+SOURCE_PATH = .../example/image.png
+```
+
+So the avatar's source image is:
+
+```text
+example/image.png
+```
+
+---
+
+# 19. Ditto `setup_Nd`
+
+You then calculate:
+
+```python
+num_f = math.ceil(len(audio) / 16000 * 25)
+```
+
+and call:
+
+```python
+SDK.setup_Nd(
+    N_d=num_f,
+    fade_in=-1,
+    fade_out=-1,
+    ctrl_info={}
+)
+```
+
+`N_d` is therefore related to the expected number of output video frames.
+
+The relationship is approximately:
+
+```text
+audio duration
+     ×
+25 FPS
+     =
+N_d
+```
+
+---
+
+# 20. Ditto's online chunking
+
+Your current working code uses:
+
+```python
+chunksize = (3, 5, 2)
+```
+
+and:
+
+```python
+split_len = int(
+    sum(chunksize) * 0.04 * 16000
+) + 80
+```
+
+which gives:
+
+```text
+6480 samples
+```
+
+The audio is then processed using:
+
+```python
+for i in range(0, len(audio), chunksize[1] * 640):
+```
+
+and:
+
+```python
+audio_chunk = audio[i:i + split_len]
+```
+
+Then:
+
+```python
+SDK.run_chunk(audio_chunk, chunksize)
+```
+
+is the core Ditto streaming call.
+
+---
+
+# 21. Most important Ditto input difference
+
+This is an important implementation detail.
+
+Cartesia/LiveKit gives us:
+
+```python
+memoryview
+```
+
+while your current Ditto code uses:
+
+```python
+numpy.ndarray
+```
+
+with:
+
+```text
+dtype = float32
+```
+
+Therefore we need an adapter:
+
+```text
+LiveKit AudioFrame
+       │
+       ▼
+frame.data
+       │
+       ▼
+memoryview
+       │
+       ▼
+NumPy array
+       │
+       ▼
+float32 PCM samples
+       │
+       ▼
+16 kHz mono
+       │
+       ▼
+Ditto SDK.run_chunk()
+```
+
+We should **not pass `memoryview` directly into Ditto** without converting it to the representation Ditto expects.
+
+---
+
+# 22. Important PCM representation issue
+
+We have confirmed:
+
+```text
+16 kHz
+mono
+raw audio
+memoryview
+```
+
+But the adapter must verify the underlying sample representation before conversion.
+
+The safest implementation will inspect:
+
+```python
+frame.data.dtype
+```
+
+or the corresponding LiveKit audio-frame representation in your installed version.
+
+The goal is ultimately:
+
+```python
+np.ndarray
+dtype=np.float32
+shape=(samples,)
+```
+
+containing normalized mono PCM samples suitable for:
+
+```python
+SDK.run_chunk(...)
+```
+
+This is one of the few remaining low-level details that should be verified at implementation time rather than guessed.
+
+---
+
+# 23. Ditto's chunk format
+
+Your existing Ditto implementation expects an audio chunk approximately like:
+
+```python
+audio_chunk: np.ndarray
+```
+
+with:
+
+```text
+sample rate = 16000
+mono
+float32
+```
+
+and the chunk length is designed around Ditto's online pipeline.
+
+Your existing:
+
+```python
+chunksize = (3, 5, 2)
+```
+
+and:
+
+```python
+split_len = 6480
+```
+
+should therefore initially be preserved.
+
+**We should not redesign Ditto's chunking and the LiveKit integration simultaneously.**
+
+First make:
+
+```text
+Cartesia chunks
+      ↓
+buffer
+      ↓
+Ditto-compatible chunks
+```
+
+Then optimize.
+
+---
+
+# 24. Why a buffer is necessary
+
+Cartesia gives variable-size chunks:
+
+```text
+160
+640
+1280
+2560
+3200
+...
+```
+
+Ditto's existing online implementation processes chunks according to:
+
+```python
+chunksize = (3, 5, 2)
+```
+
+and a processing window around:
+
+```text
+6480 samples
+```
+
+Therefore:
+
+```text
+Cartesia chunk boundaries
+```
+
+and:
+
+```text
+Ditto chunk boundaries
+```
+
+are not necessarily the same.
+
+We should therefore introduce an audio buffer:
+
+```text
+Cartesia chunk
+      ↓
+      Buffer
+      ↑
+Cartesia chunk
+      ↓
+      Buffer
+      ↑
+Cartesia chunk
+      ↓
+      Buffer
+      │
+      ├── enough samples?
+      │       │
+      │       ▼
+      │   6480-sample
+      │   Ditto chunk
+      │
+      └── remainder stays buffered
+```
+
+This is one of the most important implementation details.
+
+---
+
+# 25. Do not call Ditto once per `SynthesizedAudio`
+
+This would be a mistake.
+
+For example:
+
+```python
+async for ev in tts_stream:
+    SDK.run_chunk(ev.frame.data, chunksize)
+```
+
+is **not** the correct design because LiveKit chunks are variable-sized.
+
+Instead:
+
+```text
+SynthesizedAudio
+      ↓
+extract samples
+      ↓
+append to buffer
+      ↓
+check buffer length
+      ↓
+construct Ditto-compatible chunk
+      ↓
+SDK.run_chunk()
+```
+
+---
+
+# 26. Handling `is_final`
+
+When:
+
+```python
+ev.is_final == False
+```
+
+we continue buffering.
+
+When:
+
+```python
+ev.is_final == True
+```
+
+we know the current speech segment has ended.
+
+At that point:
+
+```text
+remaining buffered audio
+        ↓
+pad if necessary
+        ↓
+final Ditto chunk
+        ↓
+finish current avatar segment
+```
+
+This gives us a clean speech-segment lifecycle.
+
+---
+
+# 27. Speech segment lifecycle
+
+The intended Ditto adapter lifecycle should be:
+
+```text
+START SEGMENT
+     │
+     ▼
+Create/reset audio buffer
+     │
+     ▼
+Receive SynthesizedAudio
+     │
+     ▼
+Convert audio
+     │
+     ▼
+Append to buffer
+     │
+     ▼
+Enough samples?
+     │
+     ├── NO ──► continue receiving
+     │
+     └── YES
+           │
+           ▼
+       SDK.run_chunk()
+           │
+           ▼
+      receive frames
+           │
+           ▼
+       continue...
+           │
+           ▼
+    is_final == True
+           │
+           ▼
+     flush remaining
+           │
+           ▼
+      segment finished
+```
+
+---
+
+# 28. Ditto video output
+
+Your `DisplayWriter` confirms that Ditto produces image frames.
+
+The writer receives:
+
+```python
+img
+```
+
+and:
+
+```python
+fmt="rgb"
+```
+
+Your code converts:
+
+```python
+frame_bgr = img[..., ::-1]
+```
+
+and displays it with:
+
+```python
+cv2.imshow(...)
+```
+
+You also observed the frame shape/dtype through:
+
+```python
+print(f"Frame Shape: {frame_bgr.shape}")
+print(f"Frame Dtype: {frame_bgr.dtype}")
+```
+
+So the Ditto output is a video-frame image represented as a NumPy array.
+
+---
+
+# 29. Phase-1 output requirement
+
+For the first integration phase, we do **not** need:
+
+```text
+Ditto → LiveKit VideoTrack → frontend
+```
+
+Instead:
+
+```text
+Ditto
+  ↓
+NumPy video frame
+  ↓
+OpenCV
+  ↓
+local avatar window
+```
+
+This lets us isolate the difficult problem:
+
+```text
+Cartesia → Ditto
+```
+
+from:
+
+```text
+Ditto → WebRTC → frontend
+```
+
+---
+
+# 30. Existing Anam integration
+
+Currently you have:
+
+```python
+ANAM_ENABLED = True
+```
+
+and:
+
+```python
+avatar = anam.AvatarSession(...)
+```
+
+followed by:
+
+```python
+await avatar.start(session, room=ctx.room)
+```
+
+For Ditto integration, Anam should eventually be removed/replaced.
+
+But for the first test, the important goal is simply:
+
+```text
+LiveKit voice agent
+        │
+        ├── normal audio
+        │
+        └── Ditto local video
+```
+
+The Ditto integration should not disturb normal voice playback.
+
+---
+
+# 31. Critical fan-out requirement
+
+This is perhaps the most important architectural rule:
+
+**Ditto must be a consumer of the synthesized audio, not the owner of the synthesized audio.**
+
+So:
+
+```text
+SynthesizedAudio
+      │
+      ├──────────────► LiveKit Audio Playback
+      │
+      └──────────────► Ditto Adapter
+```
+
+not:
+
+```text
+SynthesizedAudio
+      │
+      ▼
+Ditto
+      │
+      ▼
+LiveKit Audio
+```
+
+This ensures that if Ditto crashes, the voice agent can still speak.
+
+---
+
+# 32. Recommended adapter structure
+
+The clean architecture should introduce a dedicated class, conceptually:
+
+```python
+class DittoAdapter:
+    ...
+```
+
+Its responsibility should be only:
+
+```text
+AudioFrame
+   ↓
+audio conversion
+   ↓
+buffering
+   ↓
+Ditto chunking
+   ↓
+SDK.run_chunk()
+   ↓
+video frames
+```
+
+It should **not** know about:
+
+* STT
+* LLM
+* RAG
+* Speechmatics
+* Cartesia WebSocket internals
+* LiveKit room management
+
+---
+
+# 33. Recommended separation
+
+The project should eventually look like:
+
+```text
+worker.py
+    │
+    ├── LiveKit
+    ├── STT
+    ├── LLM
+    ├── Cartesia
+    │
+    └── DittoAdapter
+             │
+             ├── audio conversion
+             ├── buffering
+             ├── Ditto StreamSDK
+             └── frame output
+```
+
+This keeps `worker.py` from becoming a giant Ditto implementation.
+
+---
+
+# 34. Exact important functions/classes
+
+These are the important functions/classes we have identified.
+
+### LiveKit
+
+```python
+AgentSession
+```
+
+Your session is created here:
+
+```python
+session = AgentSession(...)
+```
+
+### Cartesia
+
+```python
+cartesia.TTS(...)
+```
+
+Your instance:
+
+```python
+tts=cartesia.TTS(
+    voice=os.getenv("CARTESIA_VOICE_ID"),
+)
+```
+
+### TTS stream
+
+The relevant application-level abstraction is:
+
+```python
+tts.stream(...)
+```
+
+with:
+
+```python
+async for ev in tts_stream:
+```
+
+### SynthesizedAudio
+
+```python
+SynthesizedAudio
+```
+
+Important fields:
+
+```python
+ev.frame
+ev.request_id
+ev.segment_id
+ev.is_final
+ev.delta_text
+```
+
+### AudioFrame
+
+```python
+rtc.AudioFrame
+```
+
+Important fields:
+
+```python
+frame.data
+frame.sample_rate
+frame.num_channels
+frame.samples_per_channel
+frame.duration
+```
+
+### LiveKit internal emitter
+
+```python
+AudioEmitter.push()
+```
+
+and internally:
+
+```python
+AudioEmitter._main_task()
+```
+
+These are useful for understanding LiveKit internals, but **we should not modify them**.
+
+### Ditto
+
+```python
+StreamSDK
+```
+
+Initialization:
+
+```python
+SDK = StreamSDK(CFG_PKL, DATA_ROOT)
+```
+
+Avatar setup:
+
+```python
+SDK.setup(...)
+```
+
+Frame setup:
+
+```python
+SDK.setup_Nd(...)
+```
+
+Online audio processing:
+
+```python
+SDK.run_chunk(audio_chunk, chunksize)
+```
+
+Cleanup:
+
+```python
+SDK.close()
+```
+
+---
+
+# 35. Complete data transformation
+
+This is the most useful implementation map:
+
+```text
+                    CARTESIA
+                       │
+                       ▼
+              TTS audio stream
+                       │
+                       ▼
+              LiveKit TTS layer
+                       │
+                       ▼
+                SynthesizedAudio
+                       │
+                       ▼
+                  ev.frame
+                       │
+                       ▼
+                 frame.data
+                       │
+                       ▼
+                   memoryview
+                       │
+                       ▼
+                PCM conversion
+                       │
+                       ▼
+                NumPy float32
+                       │
+                       ▼
+                  16 kHz mono
+                       │
+                       ▼
+                 Audio Buffer
+                       │
+              accumulate samples
+                       │
+                       ▼
+              Ditto-sized chunk
+                       │
+                       ▼
+             SDK.run_chunk(...)
+                       │
+                       ▼
+                 Ditto inference
+                       │
+                       ▼
+               NumPy RGB frame
+                       │
+                       ▼
+                    OpenCV
+```
+
+---
+
+# 36. Current performance limitation
+
+We have already established that correctness and performance are two separate problems.
+
+Your RTX 3050 Laptop GPU has:
+
+```text
+4 GB VRAM
+```
+
+Your current Ditto online implementation is around:
+
+```text
+4–6 FPS
+```
+
+while GPU utilization can become very high.
+
+Therefore the first milestone should **not** be:
+
+> Make Ditto real-time at 25 FPS.
+
+The first milestone is:
+
+> Successfully feed live Cartesia audio into Ditto and generate the correct avatar frames.
+
+Then optimize.
+
+---
+
+# 37. Offline vs online
+
+### Current offline-style pipeline
+
+```text
+Complete audio
+      ↓
+Ditto
+      ↓
+Complete video
+```
+
+This has more context and generally performs better.
+
+### Required online pipeline
+
+```text
+Cartesia audio chunk
+      ↓
+buffer
+      ↓
+Ditto
+      ↓
+video frames
+      ↓
+next audio chunk
+      ↓
+Ditto
+      ↓
+...
+```
+
+This is required for a conversational voice agent.
+
+---
+
+# 38. What we have definitively confirmed
+
+We can now confidently state:
+
+### LiveKit
+
+* `SynthesizedAudio` contains the generated TTS audio.
+* `SynthesizedAudio.frame` is the important audio object.
+* `frame.data` contains the audio samples.
+* Audio can be accessed in memory.
+* `request_id`, `segment_id`, and `is_final` are available.
+* `AudioEmitter` is the internal bridge.
+* `AudioEmitter.push()` is part of the internal path.
+* We should not modify LiveKit's installed package.
+
+### Cartesia
+
+* TTS is streaming.
+* It uses a WebSocket.
+* Audio arrives incrementally.
+* Audio reaches the LiveKit layer as synthesized audio frames.
+* Runtime audio observed is 16 kHz mono.
+* Chunk sizes are variable.
+* `segment_id` stays consistent throughout a speech segment.
+* `is_final=True` marks the final chunk.
+
+### Ditto
+
+* Online mode is supported.
+* `StreamSDK` is the primary interface.
+* Audio is expected as NumPy audio data.
+* Current working pipeline uses 16 kHz audio.
+* Current pipeline uses mono float audio.
+* Online processing uses `SDK.run_chunk()`.
+* Existing implementation uses `chunksize=(3,5,2)`.
+* Existing processing window is approximately 6480 samples.
+* Ditto generates NumPy image frames.
+* Your current local display path uses OpenCV.
+
+---
+
+# 39. What the integration must NOT do
+
+We should avoid these approaches:
+
+### ❌ Modify:
+
+```text
+site-packages/livekit/agents/tts/tts.py
+```
+
+### ❌ Hook directly into Cartesia's WebSocket
+
+```text
+Cartesia WebSocket → custom code
+```
+
+### ❌ Treat every LiveKit audio event as a Ditto chunk
+
+```python
+SDK.run_chunk(ev.frame.data, ...)
+```
+
+### ❌ Convert the audio to WAV/MP3 unnecessarily
+
+The audio is already available in memory.
+
+### ❌ Block LiveKit audio playback while Ditto processes
+
+Ditto should run as a separate consumer/work path.
+
+### ❌ Solve FPS optimization at the same time as integration
+
+First establish:
+
+```text
+Cartesia → Ditto
+```
+
+then optimize.
+
+---
+
+# 40. The remaining implementation-level verification
+
+There is really only one important low-level thing that should be verified during implementation:
+
+### The exact numeric representation of:
+
+```python
+frame.data
+```
+
+We know:
+
+```text
+memoryview
+16 kHz
+mono
+```
+
+but before converting it, the adapter should inspect the underlying format and produce:
+
+```python
+np.ndarray
+dtype=np.float32
+```
+
+without accidentally interpreting the bytes incorrectly.
+
+That is a **small implementation verification**, not an architectural blocker.
+
+---
+
+# 41. Final implementation blueprint
+
+The implementation should therefore follow this exact conceptual structure:
+
+```text
+                         AgentSession
+                              │
+              ┌───────────────┴───────────────┐
+              │                               │
+             STT                             TTS
+                                              │
+                                         Cartesia TTS
+                                              │
+                                         TTS stream
+                                              │
+                                              ▼
+                                     SynthesizedAudio
+                                              │
+                              ┌───────────────┴───────────────┐
+                              │                               │
+                              ▼                               ▼
+                       LiveKit Audio                    DittoAdapter
+                       normal playback                       │
+                                                              ▼
+                                                         frame.data
+                                                              │
+                                                              ▼
+                                                        PCM → NumPy
+                                                              │
+                                                              ▼
+                                                        Audio Buffer
+                                                              │
+                                                              ▼
+                                                      6480-sample-ish
+                                                        Ditto chunk
+                                                              │
+                                                              ▼
+                                                    SDK.run_chunk()
+                                                              │
+                                                              ▼
+                                                        Video Frame
+                                                              │
+                                                              ▼
+                                                        OpenCV
+```
+
+And the adapter's core conceptual API should be:
+
+```python
+await ditto_adapter.on_synthesized_audio(
+    frame=ev.frame,
+    segment_id=ev.segment_id,
+    request_id=ev.request_id,
+    is_final=ev.is_final,
+)
+```
+
+while the original `SynthesizedAudio` continues normally toward LiveKit playback.
+
+---
+
+## Bottom line
+
+**Yes — you now have enough technical information to proceed with the integration.**
+
+The key architectural decision is:
+
+> **Do not intercept Cartesia's raw WebSocket and do not modify LiveKit internals. Intercept the `SynthesizedAudio` stream at the application layer, extract `ev.frame`, convert its 16-kHz mono PCM data into Ditto's expected `float32` NumPy representation, buffer the variable-size LiveKit chunks into Ditto-compatible online chunks, and feed them through `StreamSDK.run_chunk()`.**
+
+For the first milestone, keep the pipeline:
+
+**Cartesia → SynthesizedAudio → Ditto → OpenCV**
+
+while **normal LiveKit audio continues to the user**. Once that is stable, we can separately tackle the 4–6 FPS issue and finally publish Ditto's frames to the frontend.

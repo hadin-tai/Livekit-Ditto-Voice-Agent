@@ -1,0 +1,1384 @@
+# COMPLETE TECHNICAL ARCHITECTURE REPORT
+## LiveKit Voice Agent with RAG
+## 1. PROJECT OVERVIEW
+### What is the purpose of the project?
+This project is a production-grade real-time voice assistant application that enables human users to have spoken conversations with an AI agent. The agent provides:
+
+- Speech-to-Text (STT) transcription of user speech with speaker diarization and recognition
+- Large Language Model (LLM) conversation with tool calling capabilities
+- Text-to-Speech (TTS) natural voice synthesis
+- Document knowledge base search via RAG (Retrieval-Augmented Generation)
+- Persistent speaker memory (voice + name association)
+- A visual talking avatar (ANAM) synchronized with speech
+### What problem does it solve?
+It solves the problem of building a low-latency, natural-sounding voice AI interface that:
+
+- Avoids the latency of traditional HTTP-based request/response voice bots
+- Recognizes individual speakers by voice and remembers their names across sessions
+- Can answer questions from uploaded enterprise/PDF documents with high precision
+- Presents a human-looking talking face synchronized with speech output
+- Scales across multiple concurrent rooms via a LiveKit worker architecture
+### Overall Architecture
+Three-tier distributed architecture using LiveKit as the real-time WebRTC backbone:
+
+### High-level flow of the system
+1. User visits the React frontend, optionally selects a document, enters a room name and identity
+2. Frontend requests a LiveKit JWT token from FastAPI /token endpoint (includes user_id + document_id in metadata)
+3. Frontend connects to LiveKit Cloud via LiveKitRoom React component, publishing local microphone audio
+4. LiveKit server dispatches a Job to the registered Python agent worker
+5. Worker runs entrypoint(ctx) , connects to the room, subscribes to the audio-only stream
+6. Speechmatics STT + Silero VAD detect speech and produce diarized transcript per speaker
+7. Transcript + conversation history + speaker tags go into custom HuggingFaceLLM (GLM-5.2)
+8. LLM may call search_company_documents (Pinecone) or assign_name_2_speaker_ids tools
+9. LLM's text response is streamed to Cartesia TTS
+10. Cartesia audio is published as a remote audio track in the LiveKit room
+11. ANAM avatar publishes a video track of the talking head synced to the audio
+12. Frontend subscribes to both tracks: audio plays via RoomAudioRenderer , avatar video renders in a <video> tag
+13. Agent statuses ( listening , thinking , speaking , calling_tool ) are sent over the LiveKit data channel and displayed
+14. When the last human participant disconnects, the room is deleted via ctx.delete_room()
+## 2. FOLDER STRUCTURE
+### Root directory: d:\Livekit Voice Agent - New\
+- .gitignore - Git ignore rules
+- README.md - High-level setup documentation
+### Backend: backend\
+Entry point files:
+
+- worker.py — LiveKit agent worker entrypoint
+- main.py — FastAPI backend entrypoint
+- .env — Environment variables (API keys, URLs)
+- .env.example — Template for .env
+- requirements.txt — Python dependencies
+- speakers.json — Persistent speaker memory (label ↔ voice identifiers mapping)
+- LLM_Test.py — Standalone HuggingFace LLM latency test script
+- llmtest.py — Standalone HuggingFace tool-calling test script backend\agent\ (LiveKit agent worker)
+- worker.py — Core agent pipeline: HuggingFaceLLM , HuggingFaceLLMStream , entrypoint(ctx) , tool definitions, room lifecycle
+- prompts.py — SYSTEM_PROMPT constant (283 lines) defining LLM behavior, speaker recognition rules, and tool usage rules
+- speaker_utils.py — load_known_speakers() , save_speakers() , normalize_speaker_ids() , validate_speaker_identifiers()
+- speach_matrix_test.py — Diagnostic script to verify speechmatics.STT.get_speaker_ids() method exists backend\app\ (FastAPI backend)
+- main.py — FastAPI app factory, CORS middleware, request logging, router mounting, /health endpoint
+- config.py — Pydantic Settings class; settings singleton loads from .env backend\app\routes\
+- token.py — POST /token endpoint; uses livekit.api.AccessToken with VideoGrants(room_join=True, room=...) to sign JWTs backend\app\api\routes\
+- rag.py — POST /api/rag/search ; calls pinecone_service.chat()
+- documents.py — POST /api/documents/upload , GET /api/documents , DELETE /api/documents/{id}
+- __init__.py — Empty package marker backend\app\schemas\
+- rag.py — Pydantic RagQueryRequest (question, user_id, document_id) and RagQueryResponse (answer)
+- __init__.py — Empty package marker backend\app\services\
+- pinecone_service.py — PineconeService class; lazy-init Pinecone client; manages voice-agent-rag Assistant for upload/chat/delete with two-pass retrieval strategy
+- document_registry.py — DocumentRegistry class; JSON-file backed (documents.json) CRUD for document metadata backend\services\
+- hf_llm.py — Standalone InferenceClient wrapper generate_response() (NOT used by the agent worker; worker has its own embedded HuggingFaceLLM class)
+- __init__.py — Empty package marker backend\storage\
+- documents.json — Persistent document registry list (document_id, document_name, uploaded_at) backend\.models\
+- silero_vad.onnx — Silero Voice Activity Detection model (local ONNX)
+- smart-turn-v3.1-cpu.onnx — Speechmatics Smart Turn detection model (local ONNX) backend\venv\
+Python virtual environment — 600+ packages including livekit-agents v1.5.17, pinecone v5.3.0, fastapi v0.136.3, huggingface_hub v0.36.2
+
+### Frontend: frontend\
+- package.json — Vite/React project deps (@livekit/components-react ^2.3.0, livekit-client ^2.3.0, react-router-dom ^7.17.0)
+- package-lock.json — Lockfile
+- index.html — HTML entry with <div id="root"> and <script src="/src/main.jsx"> frontend\src\
+- main.jsx — React root renderer; imports @livekit/components-styles and styles/global.css
+- App.jsx — React Router routes: / → VoiceRoom , /documents → DocumentManager
+- api.js — Fetch wrappers: getToken() , uploadDocument() , listDocuments() , deleteDocument() all pointing at http://localhost:8000 frontend\src\components\
+- VoiceRoom.jsx — Main voice UI; LiveKitRoom , ConnectedView (with hooks), ParticipantView (avatar video/audio attach), Message component
+- VoiceRoom.css — Component styles
+- DocumentManager.jsx — Upload/select/delete UI; selection persisted in localStorage
+- DocumentManager.css — Component styles frontend\src\styles\
+- global.css — Root variables, glassmorphism utility, keyframe animations (breathe, pulse, fadeIn, slideIn, wave)
+### How files are connected
+## 3. FRONTEND
+### Framework used
+- React 18.2 with Vite 5.0.8 ( vite build , vite dev )
+- Bundler : Vite ( @vitejs/plugin-react )
+- Router : React Router DOM v7.17.0 ( BrowserRouter , Routes , Route )
+- Linting : ESLint 8.55 + react-hooks + react-refresh plugins
+### LiveKit SDK integration
+Primary packages (in package.json ):
+
+- @livekit/components-react v2.3.0 — High-level React hooks and components ( LiveKitRoom , useVoiceAssistant , useConnectionState , useRoomContext , useLocalParticipant , useParticipants , ControlBar , RoomAudioRenderer )
+- @livekit/components-styles v1.2.0 — CSS imported in main.jsx
+- livekit-client v2.3.0 — Low-level WebRTC SDK (used under the hood by components-react)
+### UI Architecture
+Two pages via React Router:
+ Page 1: / → VoiceRoom
+Component: VoiceRoom.jsx
+
+Parent component ( VoiceRoom ):
+
+- State (React useState ): roomName , identity , isConnected , token , url , status , selectedDoc
+- selectedDoc is loaded from localStorage.getItem('selectedDocumentId') on mount via useEffect
+- Flow : If NOT connected → render a join form (glassmorphism card with Room Name + Identity inputs). On click "Join Room":
+  - handleConnect() builds a metadata payload: {user_id, document_id, document_name?}
+  - calls getToken(identity, roomName, metadata) from api.js
+  - stores returned token+url in state, sets isConnected=true
+- If connected : mounts <LiveKitRoom token url serverUrl connect video=false audio=true> , containing <ConnectedView> + <RoomAudioRenderer> + <ControlBar> .
+Child component ( ConnectedView ):
+
+- Uses hooks: useConnectionState() , useVoiceAssistant() , useRoomContext() , useLocalParticipant() , useParticipants()
+- Resolves voiceState by checking multiple possible property names ( voiceAssistant.state , voiceAssistant.agent?.state , voiceAssistant.agentState , voiceAssistant.agent_state )
+- Owns detailedState local state {status, toolName} updated via LiveKit data channel
+- Data channel listener (via roomContext.on('dataReceived') ): decodes agent_status payloads {type:"agent_status", status, tool_name?} and sets detailedState
+- Room event hooks : participantConnected , participantDisconnected , trackSubscribed , trackUnsubscribed — all for debug logging
+- Participant resolution for avatar display:
+  1. looks for identity === anam-avatar-agent first
+  2. falls back to identity starting with agent- OR === voice-agent-rag
+- Renders avatar video via <ParticipantView>
+- Status display: 7 states via getDetailedStateIcon/Text → listening (👂) , speaking (🔊) , thinking (🤔) , calling_tool (🔧) , generating_response (✨) , tool_failed (❌) , default 🎧 Ready
+- Animated indicators: 5-bar wave (listening), 3-dot bounce (thinking), 7-bar orange wave (speaking), purple spinner (calling_tool)
+- Participants bar (top-right fixed): renders unique human participant badges excluding the avatar agent identity Page 2: /documents → DocumentManager
+Component: DocumentManager.jsx
+
+- documents , selectedDocId , selectedDocName , uploading , loading state
+- On mount: loads saved selection from localStorage , loads document list via listDocuments()
+- handleFileUpload : POSTs via FormData to /api/documents/upload , refreshes list
+- handleSelectDocument : stores id+name in state AND localStorage (both keys)
+- handleDeleteDocument : confirms → calls deleteDocument(docId) → clears localStorage if deleted doc was selected
+### State management
+- Only React local state ( useState ) — no Redux, no Zustand, no Context providers for app state
+- Cross-session persistence via localStorage only for selectedDocumentId and selectedDocumentName
+- LiveKit state is managed internally by the SDK and surfaced via @livekit/components-react hooks
+### How the frontend joins a LiveKit room
+Exact flow in VoiceRoom.jsx :
+
+1. User clicks Join Room
+2. handleConnect() sets status to Connecting...
+3. Builds metadata object with selected document info
+4. Calls getToken(identity, roomName, metadata) → which calls fetch('http://localhost:8000/token', { method:'POST', body: JSON.stringify({identity, room_name: roomName, metadata}) })
+5. Extracts {token, url} from response
+6. Sets token and url state, isConnected=true , status='Connected'
+7. Render path now renders <LiveKitRoom token={token} serverUrl={url} connect={true} video={false} audio={true}> . LiveKitRoom calls room.connect() internally via the livekit-client SDK, publishing mic audio, subscribing to remote tracks.
+### How tokens are requested
+Single function in api.js :
+
+### Audio publishing/subscribing
+- Publishing : Handled automatically by LiveKitRoom component with prop audio={true} , plus user toggle via <ControlBar /> (which internally uses useLocalParticipant() 's microphone toggle).
+- Subscribing : All remote audio is rendered via the single <RoomAudioRenderer /> component from @livekit/components-react — it attaches all remote audio tracks to an AudioContext and plays them. Avatar video audio is also attached in ParticipantView via track.attach(audioRef.current) but RoomAudioRenderer typically handles all audio.
+### Video/Avatar rendering
+ParticipantView component:
+
+- useRef for videoRef (HTMLVideoElement) and audioRef (HTMLAudioElement)
+- Listens to participant events: trackPublished , trackSubscribed , trackUnsubscribed
+- On subscribe: if track.kind === 'video' → track.attach(videoRef.current) . Audio → track.attach(audioRef.current)
+- Also scans existing subscribed tracks on mount to attach already-subscribed ones
+- Renders <video autoPlay playsInline muted /> + <audio autoPlay />
+- Container: .avatar-container with 16:9 aspect ratio, glass background
+### Conversation rendering
+- Not currently rendered . A legacy Message component exists at lines 451-471 but is NOT mounted in the JSX. The UI only shows avatar + state indicator.
+- Messages are available via voiceAssistant?.messages (referenced at line 208) and an auto-scroll useEffect exists at lines 318-320, but no <Message> elements are rendered.
+### Event listeners
+LiveKit room events registered in ConnectedView useEffect :
+
+1. roomContext.on('dataReceived', handleDataReceived) — decodes agent status data messages
+2. roomContext.on('participantConnected', …) — debug log
+3. roomContext.on('participantDisconnected', …) — debug log
+4. roomContext.on('trackSubscribed', …) — debug log
+5. roomContext.on('trackUnsubscribed', …) — debug log
+6. participant.on('trackPublished') / trackSubscribed / trackUnsubscribed — per-participant in ParticipantView for track attach/detach
+### API calls
+All through api.js :
+
+Function Method Endpoint Purpose getToken(id, room, meta) POST /token Get LiveKit JWT uploadDocument(file) POST /api/documents/upload Upload PDF to Pinecone listDocuments() GET /api/documents List registered docs deleteDocument(id) DELETE /api/documents/{id} Delete from Pinecone + registry
+
+API base URL is hardcoded: const API_URL = 'http://localhost:8000' ( api.js L1 ).
+
+### Authentication flow
+No traditional authentication. The FastAPI /token endpoint is unauthenticated. The token encodes identity and room grants but no user password check. Metadata is passed from frontend verbatim. Security relies on obscurity + LiveKit Cloud URL.
+
+### Complete connection workflow
+## 4. BACKEND ARCHITECTURE
+### Framework
+Python FastAPI 0.136.3 with Pydantic 2.13.4 settings, Starlette 1.2.1 ASGI, served by uvicorn 0.49.0 . Separate worker process using livekit-agents 1.5.17 runner.
+
+### APIs
+Three routers mounted in main.py :
+
+### Route files token.py
+- Router: APIRouter() mounted with no prefix → POST /token
+- Models: TokenRequest(BaseModel) {identity: str, room_name: str, metadata: dict|None}; TokenResponse(BaseModel) {token: str, url: str}
+- Handler generate_token(request: TokenRequest) :
+  - Builds api.AccessToken(LIVEKIT_API_KEY, LIVEKIT_API_SECRET).with_identity(request.identity).with_grants(VideoGrants(room_join=True, room=request.room_name))
+  - If metadata present: .with_metadata(json.dumps(metadata))
+  - Returns TokenResponse(token=builder.to_jwt(), url=settings.LIVEKIT_URL)
+  - Full latency logging with time.perf_counter rag.py
+- Router: APIRouter() → POST /api/rag/search
+- Accepts RagQueryRequest (question, user_id, document_id)
+- Returns RagQueryResponse (answer string)
+- Delegates to pinecone_service.chat(question, user_id, document_id) documents.py
+Three endpoints:
+
+1. POST /api/documents/upload — UploadFile form field (enforced .pdf extension). Saves temp file to backend/temp/ , calls pinecone_service.upload_file() with user_id="default_user" and generated UUID document_id . Saves metadata via document_registry.save_document() . Finally deletes the temp file. Returns {success, document_id, document_name} .
+2. GET /api/documents — returns document_registry.list_documents() (list of {document_id, document_name} )
+3. DELETE /api/documents/{document_id} — calls pinecone_service.delete_file(document_id) , then document_registry.delete_document(document_id)
+### Services pinecone_service.py
+Class PineconeService with singleton pinecone_service = PineconeService() :
+
+- Lazy init : _initialize() is called on first access to .pc or .assistant property
+- Creates/gets Pinecone Assistant named voice-agent-rag with instructions (8 rules: answer from doc only, never guess, etc.)
+- Methods :
+  - upload_file(file_path, user_id, document_id) → self._assistant.upload_file(file_path, metadata={type:"pdf", user_id, document_id, workspace_id:"default"})
+  - retrieve_context(question, user_id, document_id, top_k=25, snippet_size=1400) → self._assistant.context(query=question, top_k, snippet_size, filter={user_id, document_id})
+  - delete_file(document_id) → self._assistant.delete_file(document_id)
+  - chat(question, user_id, document_id) — Two-pass retrieval strategy :
+    - _expand_queries() returns up to 4 variants: original, lowercase, punctuation-stripped, first-6-words
+    - Pass 1 : assistant.chat(..., temperature=0, top_k=25, snippet_size=1400, queries=expanded, filter={user_id, document_id})
+    - If answer contains any "not found" phrase (checked via _is_not_found() matching "not found in document" and 5 variants), run Pass 2 : top_k=40, snippet_size=800
+    - Extract answer via _extract_answer() which tries response.message.content → response.message → response.messages[-1].content → str(response) document_registry.py
+Class DocumentRegistry singleton document_registry = DocumentRegistry() :
+
+- File-backed at backend/storage/documents.json
+- Methods: save_document(id, name) → appends {document_id, document_name, uploaded_at: ISO} to the list; list_documents() → returns only {document_id, document_name} fields; get_document(id) → lookup; delete_document(id) → filter-remove; _load_documents() / _save_documents() internal JSON helpers
+### Utility files
+- config.py — Settings(BaseSettings) ; loads on import; fails fast if required env vars missing
+- speaker_utils.py — normalize_speaker_ids(raw_ids) handles both str-list and dict-list (with speaker_identifiers key) formats; validate_speaker_identifiers(identifiers) strips non-strings; load_known_speakers(Path) → list[SpeakerIdentifier] (logs labels); save_speakers(Path, speakers) → writes JSON
+### Startup sequence
+Process A: FastAPI ( backend$ uvicorn app.main:app --reload ):
+
+1. Python imports app.main
+2. from app.config import settings → config.py runs load_dotenv() , instantiates Settings() , validates all required env vars
+3. logging.basicConfig(INFO) runs
+4. FastAPI(title=...) is created
+5. CORS middleware is added (permissive: allow_origins=["*"] , all methods, all headers)
+6. Request-logging middleware wraps every request
+7. All three routers are .include_router() 'd
+8. Module-level logger writes "Backend application startup complete"
+9. uvicorn binds to port 8000 and serves ASGI
+Process B: Agent Worker ( backend$ python -m agent.worker dev ):
+
+1. CPython runs agent/worker.py as __main__
+2. Top-level: BACKEND_DIR added to sys.path so app.config imports work
+3. Dotenv loaded with load_dotenv()
+4. Loggers configured: voice_agent (INFO), anam_debug (DEBUG), llm_debug (DEBUG) — each with stdout StreamHandler
+5. Module-level globals: SPEAKERS_FILE , known_speakers = [] , stt = None , participant_metadata = {user_id:"default_user", document_id:"default_doc"}
+6. Import of speaker_utils succeeds
+7. if __name__ == "__main__" block runs: cli.run_app(WorkerOptions(entrypoint_fnc=entrypoint))
+8. livekit.agents.cli connects to LiveKit Cloud and registers the worker
+### Worker startup
+The cli.run_app() from livekit-agents parses CLI args (the dev subcommand enables verbose mode + auto-reload) and starts the worker loop which:
+
+- Opens WebSocket connection to LIVEKIT_URL using LIVEKIT_API_KEY + LIVEKIT_API_SECRET
+- Registers itself as available for Room jobs
+- On each incoming job, spawns a thread (per project memory: jobs run in non-main threads ; signal.signal() is forbidden — cleanup uses ctx.add_shutdown_callback )
+- Calls the user's entrypoint(ctx: JobContext) function
+### Environment variables
+Loaded from backend/.env via python-dotenv and Pydantic BaseSettings in config.py :
+
+Name Type Default Required LIVEKIT_URL str — Yes LIVEKIT_API_KEY str — Yes LIVEKIT_API_SECRET str — Yes GOOGLE_API_KEY str — Yes (unused) DEEPGRAM_API_KEY str — Yes (unused; active STT is Speechmatics) CARTESIA_API_KEY str — Yes SPEECHMATICS_API_KEY str — Yes ANAM_API_KEY str — Yes ANAM_AVATAR_ID str — Yes PINECONE_API_KEY Optional[str] None No ASSISTANT_NAME str "voice-agent-rag" No RAG_API_URL str " http://localhost:8000/api/rag/search " No HF_TOKEN str os.getenv("HF_TOKEN") Effectively Yes HF_LLM_MODEL str os.getenv("HF_LLM_MODEL") Effectively Yes CARTESIA_VOICE_ID str os.getenv("CARTESIA_VOICE_ID") Effectively Yes
+
+### Configuration loading
+Two levels to ensure env vars are read:
+
+1. dotenv.load_dotenv() called at config.py L6, at worker.py L93, at hf_llm.py L8. This reads .env from the current working directory ( backend/ ) into os.environ .
+2. Pydantic Settings(BaseSettings) with class Config: env_file = ".env" — Pydantic automatically pulls from os.environ .
+Both settings = Settings() singleton pattern used by FastAPI routes and Pinecone service. Worker.py reads env vars two ways: from app.config import settings for structured values (LIVEKIT keys, API keys, RAG_API_URL) AND direct os.getenv() for HF_TOKEN, CARTESIA_VOICE_ID, ANAM_API_KEY, ANAM_AVATAR_ID (because they're also available via settings but worker uses both paths).
+
+## 5. LIVEKIT INTEGRATION
+### How workers are started
+Command: python -m agent.worker dev — invokes worker.py __main__ block L1167-1173:
+
+cli.run_app from livekit.agents.cli is a Typer-based CLI. The dev subcommand enables:
+
+- Log level DEBUG
+- File watcher (auto-reload on code change via watchfiles)
+- Pretty formatting
+### Worker registration
+WorkerOptions(entrypoint_fnc=entrypoint) creates the worker descriptor. The livekit-agents worker:
+
+1. Loads LIVEKIT_URL , LIVEKIT_API_KEY , LIVEKIT_API_SECRET from env
+2. Connects to the LiveKit server as a worker
+3. Sends a worker registration message declaring it accepts Room job types
+4. Blocks waiting for job dispatches
+### Job dispatch
+When the first participant joins a room (the human user connects via the React frontend), LiveKit:
+
+1. Sees no agent has joined the room yet
+2. Creates a RoomJob description referencing the room SID + name
+3. Picks an available registered worker
+4. Delivers the job over the worker WebSocket
+### Worker lifecycle
+Per job:
+
+1. Worker allocates a new JobContext ctx
+2. Worker spawns a non-main thread
+3. User's entrypoint(ctx) runs asynchronously in an asyncio event loop
+4. When entrypoint returns OR the job is cancelled by server → ctx shutdown callbacks fire
+### entrypoint() execution
+Full function at worker.py L812-L1164 :
+
+Step 1 — Setup & logging (L814-823):
+
+Step 2 — Room cleanup helpers (L828-858):
+
+Step 3 — Connect (L860-863):
+
+This makes the agent join the LiveKit room as a participant (identity auto-generated OR the ASSISTANT_NAME). It publishes agent audio/video tracks and auto-subscribes only to audio.
+
+Step 4 — Status-sending infrastructure (L866-893):
+
+- send_agent_status(status, tool_name?) → ctx.room.local_participant.publish_data(json.dumps({type:"agent_status", status, tool_name?}).encode(), reliable=True)
+- tool_wrapper(func, tool_name) → async wrapped that first sends calling_tool status, runs func, then sends generating_response status (or tool_failed )
+Step 5 — Room event handlers (L896-956): All registered with @ctx.room.on(...) as SYNCHRONOUS functions (per project memory: async def event handlers cause ValueError). Any async work inside uses asyncio.create_task(...) .
+
+- participant_connected : logs identity/sid/room. Parses participant.metadata JSON and writes into the participant_metadata global {user_id, document_id}. This is how RAG tool knows which document to search.
+- participant_disconnected : schedules asyncio.create_task(check_and_delete_room())
+- track_published : logs kind/participant
+- track_subscribed : logs kind/participant
+Step 6 — Wait for participant (L958-976):
+
+Blocks until a remote participant (the human) appears. Then re-reads their metadata (same JSON parse as participant_connected) and writes to participant_metadata .
+
+Step 7 — Initialize STT (L978-991):
+
+Step 8 — Wrap tools (L993-1015): Applies tool_wrapper() to assign_name_2_speaker_ids and search_company_documents , then creates new @function_tool decorated versions that call the wrapped versions.
+
+Step 9 — Create Agent (L1017-1021):
+
+Step 10 — Initialize HuggingFace LLM (L1023-1045): Checks HF_TOKEN env var, logs the model name from settings, instantiates HuggingFaceLLM(model=settings.HF_LLM_MODEL, api_key=hf_token, provider="auto", temperature=0.7, max_tokens=1024) .
+
+Step 11 — Initialize AgentSession (L1047-1058):
+
+Step 12 — Session event listeners (L1061-1100): Again synchronous def callbacks, registered with @session.on(...) .
+
+- user_input_transcribed : logs final Speaker ID + transcript
+- conversation_item_added : when assistant item added → save current_agent_response[0] = text + log TTS start
+- agent_state_changed : logs old/new state; publishes listening / speaking / thinking status via send_agent_status() (wrapped in asyncio.create_task ); detects TTS end on transition speaking→listening
+Step 13 — Anam Avatar initialization (L1102-1155):
+
+Step 14 — Start session (L1157-1163):
+
+This blocks FOREVER — it's the main agent event loop pumping audio → STT → LLM → TTS → audio.
+
+### ctx.connect()
+Signature called: await ctx.connect(auto_subscribe=AutoSubscribe.AUDIO_ONLY) . No video subscribed (keeps bandwidth down). The agent publishes its audio and the avatar publishes video.
+
+### AgentSession creation
+AgentSession from livekit.agents orchestrates all AI components. The constructor binds:
+
+- stt : receives raw PCM audio from subscribed mic track
+- llm : receives concatenated user+assistant chat items
+- tts : receives LLM text chunks, produces audio
+- vad : detects speech start/end to drive turn-taking
+- preemptive_generation=False : "wait for user to finish speaking before LLM starts" (slower but avoids interrupting mid-sentence)
+session.start(agent, room, ...) connects everything together: taps into room audio → VAD → STT → user transcript event → conversation history → LLM chat → tool calling → TTS → publish agent audio track.
+
+### Room connection
+Agent participant joins via ctx.connect (above). Avatar joins via avatar.start(session, room) (separate participant identity: "anam-avatar-agent"). Both use the LiveKit SDK credentials.
+
+### Participant events
+Registered via decorators:
+
+- @ctx.room.on("participant_connected") → synchronous; parses metadata
+- @ctx.room.on("participant_disconnected") → synchronous; creates task for room cleanup
+- @ctx.room.on("track_published") → logs
+- @ctx.room.on("track_subscribed") → logs
+The session object also emits events: user_input_transcribed , conversation_item_added , agent_state_changed
+
+### Audio tracks
+- Inbound (user) : Subscribed via AutoSubscribe.AUDIO_ONLY on connect. VAD inspects the track, STT streams audio to Speechmatics cloud.
+- Outbound (agent) : Created internally by the session when TTS begins streaming audio bytes. Published as a remote audio track for the frontend RoomAudioRenderer .
+### Data channels
+Bidirectional reliable data channel is used for agent→frontend status messages. Sent by send_agent_status(status, tool_name?) at worker.py L866-880 using ctx.room.local_participant.publish_data(json.dumps(payload).encode("utf-8"), reliable=True) . Received on frontend via roomContext.on('dataReceived') handler.
+
+### Room lifecycle
+1. Frontend connects → room implicitly created by LiveKit if not existing
+2. Job dispatched → agent worker accepts → entrypoint(ctx) → ctx.connect() → agent participant joins
+3. Human participant → session processes audio back-and-forth
+4. participant_disconnected fires → check_and_delete_room() runs; if no humans left, await ctx.delete_room() (not the deprecated api.RoomServiceClient )
+5. Also on worker shutdown: ctx.add_shutdown_callback(on_shutdown) triggers same cleanup
+### Worker lifecycle (multi-process)
+Single worker process can handle multiple rooms concurrently — LiveKit agents framework handles multiplexing. Each room has its own JobContext and entrypoint invocation. The globals stt , known_speakers , participant_metadata are SHARED across jobs (potential race condition — known_speakers is fine because it's written after full load, but participant_metadata being a global dict is a bug if two rooms are active simultaneously).
+
+## 6. COMPLETE END-TO-END WORKFLOW
+Step 1: User opens frontend User opens browser to http://localhost:5173 → Vite serves index.html → /src/main.jsx loads → React renders App.jsx → Router matches / → renders VoiceRoom .
+
+Step 2: Frontend requests token User optionally navigates to /documents , uploads+selects a PDF (calls uploadDocument → /api/documents/upload → Pinecone upload + JSON registry write). Returns to / , enters room name + identity, clicks Join Room. handleConnect() builds metadata {user_id: identity, document_id, document_name} , calls getToken() → fetch POST http://localhost:8000/token .
+
+Step 3: Backend generates token token.generate_token() in token.py : constructs api.AccessToken(LIVEKIT_API_KEY, LIVEKIT_API_SECRET).with_identity(identity).with_grants(VideoGrants(room_join=True, room=room_name)).with_metadata(json.dumps(metadata)).to_jwt() . Returns {token, url: settings.LIVEKIT_URL} .
+
+Step 4: Frontend connects LiveKitRoom component receives the token and wss://voice-agent-r9rofr3p.livekit.cloud URL. livekit-client SDK:
+
+- Performs DNS + WebSocket upgrade to LiveKit Cloud
+- Does ICE negotiation (STUN/TURN) for WebRTC peer connection
+- Publishes local microphone track with DTX/OPUS
+- Subscribes to any already-existing remote tracks
+Step 5: LiveKit Server LiveKit Cloud sees first human participant. It has a registered worker pool for room jobs. It creates a RoomJob referencing this room and dispatches to the Python worker.
+
+Step 6: Worker selection livekit-agents framework (running in the python -m agent.worker dev process) receives the job. A worker thread is spawned to handle it.
+
+Step 7: Worker accepts job Framework invokes entrypoint(ctx: JobContext) in the thread's asyncio loop. Logs job id, room name, room sid.
+
+Step 8: entrypoint() See Section 5 for details:
+
+1. Define check_and_delete_room + register shutdown callback
+2. await ctx.connect(AutoSubscribe.AUDIO_ONLY) — agent joins room
+3. Register room event listeners (4 sync callbacks)
+4. await ctx.wait_for_participant() — wait for human
+5. Parse participant metadata JSON → write to global participant_metadata
+6. load_known_speakers(SPEAKERS_FILE) → stt = speechmatics.STT(SMART_TURN, diarization=True, known_speakers, format strings, API_KEY)
+7. Wrap tools with status-sending, create Agent(instructions=SYSTEM_PROMPT, tools=[...])
+8. HuggingFaceLLM(zai-org/GLM-5.2, temperature=0.7, max_tokens=1024)
+9. AgentSession(stt, llm, cartesia.TTS(voice=...), silero.VAD.load(), preemptive_generation=False)
+10. Register 3 session event listeners (transcribed, item_added, state_changed)
+11. anam.AvatarSession(PersonaConfig(avatarId=...)).start(session, room) → avatar participant joins
+12. await session.start(agent, room, close_on_disconnect=False) → ENTER MAIN LOOP
+Step 9: Agent joins room LiveKit confirms agent participant is in room. Frontend's useParticipants() updates → agentParticipant resolves (looks for anam-avatar-agent first, then agent-prefix, then voice-agent-rag ). ParticipantView subscribes the avatar's video track, attaches to <video autoPlay playsInline muted> . RoomAudioRenderer subscribes to all remote audio (both agent speech + any future video's audio).
+
+Step 10: User speaks User speaks into microphone. Browser's MediaStream produces PCM audio → OPUS encoded → sent over WebRTC to LiveKit Cloud → relayed to agent worker subscribed track.
+
+Step 11: STT AgentSession pipes audio to silero.VAD (local ONNX: silero_vad.onnx ). VAD detects speech start → session "listening" state → publishes agent_status "listening" via data channel → frontend status UI shows 👂 Listening + wave bars.
+VAD detects speech end + Speechmatics Smart Turn model ( smart-turn-v3.1-cpu.onnx ) says it's a natural turn boundary → session captures audio buffer.
+Audio streamed to Speechmatics cloud with diarization enabled: produces <S1>transcript</S1> tags (or <label>…</label> if speaker known). If stored speaker identifiers match the diarized IDs, speechmatics STT already replaces S1 with Ty_Hardin label from known_speakers list.
+
+Session emits user_input_transcribed event → logger writes speaker_id + transcript.
+
+Step 12: LLM Session constructs a ChatContext containing:
+
+- System prompt: SYSTEM_PROMPT (from prompts.py)
+- Conversation history (all prior user + assistant items)
+- Latest user message (with speaker tags embedded in transcript text)
+- Tools schemas (converted to OpenAI format via llm.utils.build_strict_openai_schema )
+Calls HuggingFaceLLM.chat(chat_ctx, tools, …) → returns HuggingFaceLLMStream started with _run() .
+
+_run() converts chat_ctx to OpenAI format:
+
+Converts FunctionTool instances to OpenAI tool JSON schemas. Infers tool_choice "auto" if tools present.
+Calls _generate_once() in an asyncio.to_thread (sync HF client):
+
+Stream response chunk by chunk. For each chunk:
+
+- Extract delta.content → emit ChatChunk(delta=ChoiceDelta(content=...))
+- Detect delta.tool_calls[] → accumulate in partial_tool_calls dict (per tc.index), validating JSON as arguments accumulate. When valid AND has call_id+name AND not emitted → emit ChatChunk with tool_calls=[FunctionToolCall(type, name, arguments, call_id)] .
+- On finish_reason in ["tool_calls","stop"] → flush pending.
+If _generate_once fails, 3 retries. If all fail → fallback "I'm sorry, I couldn't…" ChatChunk.
+
+Session state becomes "thinking" → publish agent_status "thinking" → frontend shows 🤔 Thinking + dots animation.
+
+Step 13: Tool calls If the HuggingFace response streamed delta.tool_calls , session extracts them, schedules execution of each FunctionToolCall .
+
+Case A: assign_name_2_speaker_ids(name)
+
+1. Tool wrapper sends calling_tool / "assign_name_2_speaker_ids" data msg
+2. Normalize name (strip punctuation, remove whitespace, reject INVALID_NAMES set)
+3. Call stt.get_speaker_ids() → raw list → normalize_speaker_ids() → deduped list
+4. Check overlap with existing known_speakers :
+   - Same identifiers AND same label → merge identifiers
+   - Same identifiers BUT different label → reject ("voice already recognized as X")
+   - Same label BUT new voices → merge identifiers
+   - New label + new voices → append SpeakerIdentifier(label, speaker_identifiers=sorted_list)
+5. Write save_speakers(SPEAKERS_FILE, updated_speakers) → JSON write to speakers.json
+6. Update global known_speakers list
+7. Tool wrapper sends "generating_response" data msg
+8. Return "Got it! I'll remember you as {name}." → LLM uses this text as tool result
+Case B: search_company_documents(question)
+
+1. Tool wrapper sends calling_tool / "search_company_documents" data msg
+2. httpx.AsyncClient(timeout=30).POST(settings.RAG_API_URL, json={question, user_id: participant_metadata['user_id'], document_id: participant_metadata['document_id']}) → http://localhost:8000/api/rag/search
+3. FastAPI rag_search handler calls pinecone_service.chat(question, user_id, document_id)
+4. PineconeService:
+   - Expand queries to 4 variants
+   - Pass 1: assistant.chat(temperature=0, filter={user_id, document_id}, context_options={top_k=25, snippet_size=1400, queries=expanded})
+   - If answer is "not found", Pass 2 with top_k=40, snippet_size=800
+   - Extract answer text via _extract_answer()
+5. FastAPI returns {answer: string}
+6. Back in worker, tool returns the string to LLM as tool result
+7. Tool wrapper sends "generating_response" data msg
+Step 14: RAG Detailed in Section 7 & 13. The RAG pipeline is handled entirely inside Pinecone's hosted Assistant ( voice-agent-rag ):
+
+- Document uploaded as PDF → Pinecone chunks, embeds (default embedding model chosen by Pinecone Assistant), stores vectors in a managed index with workspace and per-file metadata filters
+- Chat request: assistant.chat(...) with filter={user_id, document_id} scopes retrieval to just that document; Pinecone does its own hybrid retrieval + LLM summarization inside the hosted Assistant
+- Two-pass strategy implemented on top: first pass broad top-k; if Not Found, second pass aggressive top_k with smaller snippet size to catch smaller, rare facts
+- _expand_queries() : 4 variants + deduplication (used as context_options.queries list — Pinecone runs multi-query retrieval)
+Step 15: TTS After LLM produces final text content (and tool results are fully incorporated into a second LLM turn if needed), session streams chunks to cartesia.TTS(voice=CARTESIA_VOICE_ID) — Cartesia Sonic model (provider default). Streaming response returns audio frames as they're synthesized. AgentSession publishes these frames as the agent participant's audio track. Frontend's RoomAudioRenderer picks up the track and plays via WebAudio.
+
+Session state becomes "speaking" → data msg → frontend shows 🔊 Speaking with orange 7-bar wave animation. Avatar's anam.AvatarSession is listening to the session audio stream; it generates lip-synced talking head video frames published as the "anam-avatar-agent" participant's video track.
+
+Step 16: Response published Agent audio track + Avatar video track arrive at frontend. ParticipantView renders <video> with the avatar's image. RoomAudioRenderer plays audio. Conversation item added → session catches it → logs TTS start text.
+
+Step 17: Frontend receives response Frontend hears audio, sees avatar talking. Wave animations on the status bar.
+
+When TTS finishes → session transitions speaking → listening . The agent_state_changed callback detects this and logs [TTS END] Text: '…' . Now user can speak again.
+
+Step 18: Conversation ends User closes tab or navigates away. LiveKit drops the WebRTC peer connection → fires participant_disconnected on agent side → asyncio.create_task(check_and_delete_room()) runs → zero humans → await ctx.delete_room() succeeds (sets room_deleted=True). Worker shutdown callbacks fire; session's .start() returns or is cancelled. Entrypoint returns. Worker thread exits. Worker waits for next job.
+
+## 7. AI PIPELINE
+### LLM
+Property Value Technology name Hugging Face Inference API (serverless) Exact model name zai-org/GLM-5.2 (active in .env L23) Alternative configured : Qwen/Qwen2.5-7B-Instruct (.env L24 commented) Configuration temperature=0.7, max_tokens=1024, provider="auto", stream=True, tool_choice="auto" when tools present Why it is used Cheap inference API with streaming + tool-calling support; GLM-5.2 claims strong function calling Where initialized worker.py L1038-1044 ( HuggingFaceLLM(...) ) and worker.py L139-143 (InferenceClient inside constructor) Which files use it backend/agent/worker.py (classes HuggingFaceLLM, HuggingFaceLLMStream). Standalone tests: LLM_Test.py , llmtest.py , services/hf_llm.py . Data flow ChatContext (with system prompt + history + speaker tags) → chat_ctx.to_provider_format("openai") → JSON-encoded messages + tools → asyncio.to_thread(self._client.chat.completions.create, **request_args) → iterate chunk stream → emit ChatChunk(text) + ChatChunk(tool calls) via self._event_ch.send_nowait() → AgentSession framework consumes and orchestrates tools/TTS
+
+### STT
+Property Value Provider Speechmatics (LiveKit plugin: livekit-plugins-speechmatics 1.5.17 ) Exact model Default Speechmatics real-time model; diarization + smart turn detection enabled Streaming implementation Full-duplex WebSocket by the Speechmatics RT SDK ( speechmatics-rt 1.0.0 ); livekit plugin wraps in STT class with async get_speaker_ids() method Speaker diarization enable_diarization=True ; output formatted with <{speaker_id}>…</{speaker_id}> tags. Uses built-in Speechmatics diarizer. Speaker identification known_speakers=[SpeakerIdentifier(label, speaker_identifiers), ...] passed to STT constructor; when diarization IDs match, label is substituted. assign_name_2_speaker_ids tool calls stt.get_speaker_ids() to fetch current audio fingerprints, persists them in speakers.json. Audio pipeline Room subscribed PCM → AudioFrame chunks → Speechmatics STT plugin buffers → Smart-Turn ONNX ( smart-turn-v3.1-cpu.onnx ) decides turn boundaries → text transcript with speaker tags injected into transcript field → session aggregates into conversation items Callback functions @session.on("user_input_transcribed") → on_user_input_transcribed ; logs speaker_id + transcript Event flow VAD speech start → session state listening → streaming partial STT chunks → VAD speech end + Smart Turn end → final UserInputTranscribedEvent emitted with is_final=True
+
+### TTS
+Property Value Provider Cartesia ( livekit-plugins-cartesia 1.5.17 ) Voice model Cartesia Sonne / Sonic (plugin default); voice="56e35e2d-6eb6-4226-ab8b-9776515a7094" from env CARTESIA_VOICE_ID Streaming Real websocket-based streaming TTS by Cartesia; AgentSession pipes LLM text chunks to the plugin; audio frames come back immediately with low latency Audio output Audio frames published as agent participant's track in LiveKit room; OPUS-encoded WebRTC delivery Playback flow TTS plugin → AgentSession buffers → livekit rtc AudioFrame → agent participant's track source → LiveKit server relays → frontend RoomAudioRenderer → user's speaker
+
+### VAD
+Property Value Provider Silero ( livekit-plugins-silero 1.5.17 ) Configuration Loaded via silero.VAD.load() → reads silero_vad.onnx model from backend/.models Where initialized worker.py L1056 as argument to AgentSession(vad=...) How speech start/end is detected Local ONNX model runs on each PCM audio frame; speech probability is smoothed. Start of speech triggers session state→listening. End of speech is a combination of Silero VAD end-of-speech + Speechmatics Smart Turn end-of-turn heuristic (the Smart Turn model smart-turn-v3.1-cpu.onnx is loaded by Speechmatics STT automatically when turn_detection_mode=SMART_TURN). preemptive_generation=False forces agent to wait for explicit speech END before LLM call.
+
+### Avatar
+Property Value Provider ANAM ( livekit.plugins.anam ) via livekit-agents plugin ecosystem Initialization worker.py L1138-L1146 : avatar = anam.AvatarSession(persona_config=anam.PersonaConfig(name="Assistant Avatar", avatarId="fd1485b5-a07c-477b-b233-4287cc55b629")); await avatar.start(session, room=ctx.room) Rendering Avatar publishes a video track under a separate participant identity "anam-avatar-agent" (confirmed in VoiceRoom.jsx L349-355 resolution order). Frontend ParticipantView attaches to HTMLVideoElement via track.attach(videoRef) . 16:9 aspect ratio container. autoPlay playsInline muted video attributes. Streaming Real-time WebRTC; audio-to-lip-sync + talking generation hosted by ANAM cloud API (authenticated with ANAM_API_KEY) Synchronization with speech avatar.start(session, room) binds to the AgentSession's audio output internally — it listens to the audio the session is producing, derives visemes, generates corresponding video frames on the ANAM server, publishes them in sync with the audio timestamps so frontend receives both with matching track timestamps.
+
+### Embedding model
+- Provider : Pinecone-hosted embedding (inside Pinecone Assistant feature) — user does not configure embedding model directly; the managed Assistant selects + runs embeddings automatically when PDF is uploaded.
+- Retrieval endpoint pinecone_service.retrieve_context exposes assistant.context(...) which uses Pinecone Assistant internal retrieval rather than raw Pinecone index queries.
+- Document upload path: FastAPI receives PDF → temp file → assistant.upload_file(file_path, metadata={user_id, document_id, type:"pdf", workspace_id:"default"}) → Pinecone chunks + embeds internally.
+### Vector database
+- Provider : Pinecone via pinecone 5.3.0 Python client + pinecone-plugin-assistant 3.0.3
+- Managed via : Pinecone Assistant abstraction (not raw Index), name voice-agent-rag . Assistant has its own lifecycle: pc.assistant.create_assistant(name, instructions) in _get_or_create_assistant() .
+- Scoped by user_id + document_id filter on every chat/context/upload_file/delete_file call.
+- Per-doc upload produces stored Pinecone file_id ; deletion calls assistant.delete_file(document_id) (L192).
+### RAG pipeline
+Stage Implementation Chunking Done inside Pinecone Assistant on upload; user not in control of chunk size/overlap Embedding Pinecone-internal model on the managed assistant Vector database Pinecone cloud (Pinecone Assistant) — API key from env Metadata {type:"pdf", user_id: str, document_id: UUID, workspace_id:"default"} attached to every uploaded file Retrieval 2 strategies: (1) explicit context via assistant.context(query, top_k, snippet_size, filter) — returns raw retrieved snippets (exposed as retrieve_context method but NOT called by the chat flow); (2) Pinecone's hosted assistant.chat(...) does retrieval+re-ranking+summarization INTERNALLY and returns a ready answer. Currently ACTIVE path is (2). Ranking Handled internally by Pinecone Assistant (their proprietary hybrid ranking). Multi-query expansion (4 variants) is passed as context_options.queries: [q1, q2, q3, q4] — Pinecone runs each query's retrieval and merges results. Prompt injection Done via 2 layers: (a) Pinecone Assistant instructions stored in the cloud assistant ("You are a high precision enterprise document assistant… 8 rules"); (b) Per-chat wrapper final_prompt with 6 rules + user question. Pinecone internally appends retrieved document context between these instructions (not visible in code; it's inside the managed service). Final LLM input Built by Pinecone cloud: [assistant_instructions + retrieved_document_chunks + final_prompt(user_question+rules)] → Pinecone's hosted LLM generates answer. Then the worker's local LLM (GLM-5.2) just sees a plain tool result string.
+
+### Tool calling
+Property Value Implementation Custom in HuggingFaceLLMStream._generate_once() (lines 202-418) plus AgentSession framework orchestration How LLM decides HuggingFace Inference API decides per-chunk whether to populate delta.tool_calls . tool_choice="auto" defaults to the provider's auto-selection. SYSTEM_PROMPT lines 180-228 explicitly instruct the model when to call each tool. Tool execution flow (1) LLM emits ChatChunk with delta.tool_calls[index].{id,function.name,function.arguments} → accumulated & JSON validated in partial_tool_calls dict → flush_pending_tool_calls() emits FunctionToolCall wrapped in a ChatChunk via self._event_ch.send_nowait() once valid (L256-264). (2) AgentSession consumes the ChatChunk tool events; schedules each wrapped @function_tool coroutine; captures returned string; injects a "tool result" conversation item back into the ChatContext. (3) If tool results require a second LLM pass, session triggers another LLM call automatically. (4) Meanwhile, tool_wrapper fires status messages ("calling_tool", "generating_response") over data channel.
+
+### Memory
+Two persistent stores:
+
+1. Speaker Memory — speakers.json file in backend root. Written by save_speakers() and read by load_known_speakers() . Survives worker restarts. Used to pre-seed Speechmatics STT known_speakers list so known speaker labels appear in transcripts immediately.
+2. Document Registry — storage/documents.json . Written by DocumentRegistry .
+3. Conversation History — in-memory only, managed by AgentSession's ChatContext. Lost on session end.
+4. Frontend selection — localStorage selectedDocumentId , selectedDocumentName .
+### Conversation history
+- Managed entirely by the livekit-agents AgentSession framework.
+- Structure: list of conversation items:
+  - User items: role=user, text_content = " <speaker>…</speaker> transcript" (plus speech start/end timestamps)
+  - Assistant items: role=assistant, text_content = LLM reply string
+  - Tool result items: role=tool (or equivalent) holding tool return strings
+- Before each LLM call, ChatContext.to_provider_format("openai") flattens items into OpenAI's {role, content} message list. No explicit truncation or summarization is done in code.
+### Prompt management
+All prompt templates are constants — stored as Python strings:
+
+1. Agent behavior : SYSTEM_PROMPT in prompts.py (multi-section; 10 rules in GENERAL BEHAVIOR, 3 rules in DECISION MAKING, 3 rules in SPEAKER RECOGNITION + RECOGNIZED/UNKNOWN branches, NAME INTRODUCTION examples, TOOL USAGE rules, DOCUMENT SEARCH rules, CONVERSATION CONTINUITY, ERROR PREVENTION checklist). Lines 285-311: commented-out AUTHORIZATION hard-coded for "Ty Hardin" (not enforced in active system prompt).
+2. Pinecone Assistant internal instructions : 8-rule string set in _get_or_create_assistant() at pinecone_service.py L45-55 ("high precision enterprise document assistant… answer only from uploaded document… never guess… be concise and accurate").
+3. Per-chat RAG final_prompt : pinecone_service.chat L216-229 ("Answer using uploaded document only… 6 rules + Question:").
+4. Tool descriptions : Docstring + Annotated type hints in function_tool decorators: assign_name_2_speaker_ids(name) docstring specifies when to call (only on self-introduction phrases), search_company_documents(question) docstring says "Question regarding uploaded company documents, policies, manuals, procedures, SOPs, internal knowledge base or enterprise documents".
+## 8. LLM
+### Exact model name
+Active: zai-org/GLM-5.2 (set in .env L23 and read by settings.HF_LLM_MODEL )
+Alternative (commented-out): Qwen/Qwen2.5-7B-Instruct
+
+### Provider
+Hugging Face via Inference API (Serverless endpoints). provider="auto" in InferenceClient tells HF to pick the fastest hosted inference provider backend (Novita, Hyperbolic, etc). HF_TOKEN endpoint credentials in env.
+
+### Initialization code location
+- Custom LLM class definition : worker.py L121-179 — class HuggingFaceLLM(llm.LLM)
+- Stream class : worker.py L181-500 — class HuggingFaceLLMStream(llm.LLMStream)
+- InferenceClient instantiation : worker.py L139-143 inside HuggingFaceLLM.__init__ :
+- Instance created in entrypoint : worker.py L1038-1044
+### Streaming implementation
+HuggingFaceLLMStream._run() runs as async task; calls _generate_once() which:
+
+1. await asyncio.to_thread(self._client.chat.completions.create, stream=True, …) → runs sync HF client in thread pool so event loop is not blocked
+2. Iterates the response generator for chunk in response: , with await asyncio.sleep(0) yield-point after each chunk
+3. After each chunk parse:
+   - delta_content → wrapped in ChatChunk(delta=ChoiceDelta(content=delta_content, role="assistant", tool_calls=[])) → self._event_ch.send_nowait(chat_chunk)
+   - delta.tool_calls[] → accumulated per tc.index into partial_tool_calls dict; each arguments substring concatenated; JSON validity checked on every flush
+   - flush_pending_tool_calls() internal function iterates partial_tool_calls , skips duplicates (via emitted_call_ids set), validates JSON via json.loads , creates llm.FunctionToolCall(type="function", name, arguments, call_id, extra=None) wrapped in llm.ChatChunk → ChoiceDelta → tool_calls: [list] .
+### Prompt construction
+Final LLM input built by chat_ctx.to_provider_format(format="openai") at worker.py L425 (inside _run ). This list is then forwarded to HF as the messages parameter.
+
+Messages list order after conversion:
+
+Before sending, _run also logs last_user_msg by scanning reversed for role=="user" (worker.py L452-457).
+
+### Tool calling implementation
+Schema conversion (worker.py L431-438):
+
+So every @function_tool decorated async def becomes a JSON schema of {"type":"function","function":{"name":..,"description":docstring,"parameters":{..}}} with strict typing from Annotated params.
+
+Tool choice : if self._tool_choice given, pass it through; else if tools exist → default "auto" (L440-449).
+
+Function calling execution chain :
+
+1. LLM returns delta.tool_calls[] per chunk
+2. HuggingFaceLLMStream accumulates, validates JSON, emits ChatChunk events
+3. livekit-agents AgentSession's internal LLMOrchestrator reads ChatChunk events from _event_ch async channel, groups partial calls into complete calls
+4. For each completed FunctionToolCall: looks up name in the agent's tools list, calls the async function with deserialized arguments, awaits return
+5. Appends a conversation_tool_result item to the ChatContext
+6. Runs a new LLM chat completion using the updated ChatContext, so the model can craft a user-facing response incorporating the tool result
+### System prompt
+SYSTEM_PROMPT constant, defined in prompts.py . Passed as Agent(instructions=SYSTEM_PROMPT) in entrypoint. The Agent framework prepends instructions to every ChatContext construction (map to role=system message).
+
+### Context management
+- ChatContext object from livekit-agents ( from livekit.agents.llm import ChatContext )
+- Built/maintained internally by AgentSession as conversation progresses
+- Each LLM call: chat_ctx = session.get_chat_ctx() (inside framework) → passed to HuggingFaceLLM.chat()
+- No explicit truncation strategy — relies on livekit-agents defaults
+- Context is per-AgentSession, i.e., per-room
+### Chat history management
+Fully inside AgentSession's internal ConversationState:
+
+- On user_input_transcribed → appends ConversationItem(role="user", text="<speaker>X</speaker> hi")
+- On LLM delta.content stream → accumulates, on end appends ConversationItem(role="assistant", text=full)
+- On tool results → appends ConversationItem(role="tool_result", …)
+
+## 9. SPEECH-TO-TEXT (STT)
+### Exact provider
+Speechmatics via the livekit-plugins-speechmatics==1.5.17 wrapper. Python package speechmatics-rt==1.0.0 (real-time) and speechmatics-voice==0.2.8 under the hood.
+
+### Exact model
+Speechmatics default Batch/RT English model. Not explicitly configured; Speechmatics auto-selects based on language detection. Enriched with local ONNX model backend/.models/smart-turn-v3.1-cpu.onnx for end-of-turn detection.
+
+### Streaming implementation
+Full-duplex WebSocket connection from worker → Speechmatics Cloud (region auto). Endpoint: default Speechmatics wss://{region}.speechmatics.io . API key from env SPEECHMATICS_API_KEY .
+
+LiveKit Speechmatics STT plugin's pipeline:
+
+1. Raw int16 PCM AudioFrames arrive from the subscribed remote participant's audio track
+2. Frames are buffered and also fed to Silero VAD for speech boundaries
+3. Simultaneously, audio is pushed through the plugin to Speechmatics WebSocket
+4. Partial transcript chunks arrive as JSON messages via the socket
+5. Plugin combines diarization speaker info with partial text
+6. Uses the configured speaker_active_format="<{speaker_id}>{text}</{speaker_id}>" string format to embed speaker tags
+### Speaker diarization
+Enabled via enable_diarization=True in STT constructor (worker.py L984). Speechmatics internally clusters audio per speaker and returns a numeric speaker id (or voice fingerprint).
+
+Formats (L985-986):
+
+If a known speaker identifier was provided via known_speakers=[SpeakerIdentifier("Ty_Hardin", ["AD1NQVABAAQ..."])] , Speechmatics recognizes matching voiceprints and substitutes {speaker_id} with the label "Ty_Hardin" → final text like <Ty_Hardin>Hello there</Ty_Hardin> .
+
+### Speaker identification
+Flow:
+
+1. Tool assign_name_2_speaker_ids(name) is called when an "unknown" speaker introduces themselves
+2. Inside: raw_speaker_ids = await stt.get_speaker_ids() — Speechmatics STT's method returns current session's diarized speaker fingerprint identifiers
+3. normalize_speaker_ids(raw) → flatten list of strings
+4. Append new SpeakerIdentifier(label=name, speaker_identifiers=sorted(ids)) to known_speakers
+5. Persist with save_speakers(SPEAKERS_FILE, updated_speakers) → writes speakers.json
+6. Next time entrypoint starts, load_known_speakers(SPEAKERS_FILE) rehydrates → STT(known_speakers=...) receives past known speakers, so identification happens instantly on the first utterance
+### Audio pipeline
+### Callback functions
+Session-level callback:
+
+STT also interacts with TurnDetectionMode.SMART_TURN — drives session-level turn detection which gates LLM invocation.
+
+### Event flow
+## 10. TEXT-TO-SPEECH (TTS)
+### Provider
+Cartesia ( livekit-plugins-cartesia==1.5.17 ).
+
+### Voice model
+- Model: Cartesia Sonne / Sonne-2 (plugin default streaming model)
+- Voice ID: 56e35e2d-6eb6-4226-ab8b-9776515a7094 (from .env L8 CARTESIA_VOICE_ID )
+- Initialization: cartesia.TTS(voice=os.getenv("CARTESIA_VOICE_ID")) at worker.py L1052-1055
+### Streaming
+Cartesia plugin connects the TTS input (text chunks from the LLM's streaming output) to Cartesia's WebSocket streaming endpoint ( wss://api.cartesia.ai/tts/websocket ). LLM text tokens → Cartesia returns audio chunks as they are synthesized → returned to AgentSession as an async generator of audio frames → zero-copy fed into the agent participant's audio track source. Low latency (~200-300 ms first byte typical for Cartesia Sonic).
+
+### Audio output
+AgentSession creates a LocalAudioTrack for the agent participant. TTS audio frames → pushed into track buffer → LiveKit server relays → frontend receives as remote track.
+
+### Playback flow
+1. Frontend LiveKitRoom mounts <RoomAudioRenderer /> (from @livekit/components-react). This component:
+   - Iterates over all participants with audio tracks
+   - Creates an AudioElement OR attaches to shared AudioContext
+   - Calls track.attach(element or context)
+2. Additionally, ParticipantView for the anam-avatar-agent participant has a separate <audio ref={audioRef} autoPlay /> ; on track_subscribed event it calls track.attach(audioRef.current) .
+3. Browser's audio subsystem streams the WebRTC-incoming audio samples to speaker device.
+## 11. VOICE ACTIVITY DETECTION (VAD)
+### Provider
+Silero VAD via livekit-plugins-silero==1.5.17 .
+
+### Configuration
+- Load method: silero.VAD.load() — loads backend/.models/silero_vad.onnx (Silero VAD v5/v4 ONNX)
+- Input: 16kHz mono PCM (standard for voice)
+- Aggressiveness/thresholds: Plugin defaults (not overridden in code)
+- Coupled with Speechmatics Smart Turn model ONNX: backend/.models/smart-turn-v3.1-cpu.onnx for end-of-confirmation
+### Where initialized
+- Created inline in AgentSession constructor: worker.py L1056
+- Passed to session: AgentSession(stt=..., llm=..., tts=..., vad=silero.VAD.load(), ...)
+### How speech start/end is detected
+1. Per-frame inference : Every incoming PCM AudioFrame is fed to silero_vad.onnx → returns speech probability [0..1]
+2. Start detection : Probability crosses start threshold → session emits "speech started" → transitions to listening → publishes status → STT begins feeding Speechmatics
+3. End detection : (a) Silero probability below end threshold sustained for N ms AND (b) Smart Turn model analyzes last few seconds + transcript, decides "natural turn end" → session confirms turn is over → only then triggers LLM call (because preemptive_generation=False ; if True, LLM would start as soon as partial transcript is available, but it risks cutting the speaker off mid-thought)
+## 12. AVATAR
+### Provider
+ANAM — livekit.plugins.anam (part of LiveKit Agents ecosystem with direct plugin integration). Requires ANAM_API_KEY (basic auth token) and ANAM_AVATAR_ID (the UUID of a pre-generated talking head asset stored on the ANAM platform).
+
+### Initialization
+worker.py L1102-1155 :
+
+`if ANAM_ENABLED:
+    avatar = anam.AvatarSession(
+        persona_config=anam.PersonaConfig(
+            name="Assistant Avatar",
+            avatarId="fd1485b5-a07c-477b-b233-4287cc55b629",
+        ),
+    )
+    await avatar.start(session, room=ctx.room)`
+
+Flag ANAM_ENABLED = True module-level constant L20.
+
+### Rendering
+Frontend ParticipantView picks the ANAM participant first in resolution chain:
+
+`const agentParticipant = remoteParticipants.find(p => p.identity === 'anam-avatar-agent')
+   || remoteParticipants.find(... agent-like identity ...);`
+
+Rendered in .avatar-container → .agent-video-container → <video ref={videoRef} autoPlay playsInline muted className="agent-video"> . CSS: 16:9 container, object-fit: cover , 20px radius.
+
+### Streaming
+ANAM Avatar acts as a separate LiveKit participant (distinct identity from the voice agent participant). It publishes a video track. Transport: standard LiveKit WebRTC video track (VP8/VP9/H264 codec chosen by SDK).
+
+### Synchronization with speech
+avatar.start(session, room) call binds AvatarSession to the AgentSession's audio output pipeline. ANAM does:
+
+1. Read the audio the AgentSession is about to publish (or currently publishes)
+2. Sends audio + text to the ANAM cloud endpoint (authenticated via ANAM_API_KEY)
+3. ANAM cloud's neural talking-head model generates lip-synced video frames
+4. Video frames are fed into ANAM participant's LocalVideoTrack → LiveKit → Frontend
+Audio and video tracks share the same WebRTC transport timing baseline so lip-sync looks natural.
+
+## 13. RAG PIPELINE
+### Embedding model
+- Provider : Pinecone Assistant internal embedding model. Not explicitly configured; Pinecone applies its default multilingual/e5-equivalent to PDF chunks during upload.
+- User-level alternative : The code exposes a retrieve_context() method but that calls Pinecone's assistant.context(...) which performs retrieval but uses Pinecone-chosen embeddings.
+- No local embedding code in the repository.
+### Chunking
+Pinecone Assistant handles chunking during upload_file() based on its internal heuristics (PDF-aware: respects pages, column layout, headings). No chunking parameters exposed in code.
+
+### Vector database
+- Managed Pinecone Assistant named voice-agent-rag (stored in Pinecone cloud, not a direct Index)
+- Lazy init on first pinecone_service.{pc,assistant} property access
+- Creation flow: pc.assistant.describe_assistant(name) → if 404, call pc.assistant.create_assistant(name, instructions=...) with high-precision document bot instructions
+- Files scope: Every file upload has workspace_id:"default" , type:"pdf" , user_id , document_id metadata filters
+### Metadata
+- Per-upload metadata (pinecone_service.upload_file L74-79): {type: "pdf", user_id: str, document_id: UUID, workspace_id: "default"}
+- Per-chat filter (used on chat/context): {user_id, document_id} — isolates retrieval to one uploaded document.
+- Local registry : storage/documents.json stores {document_id, document_name, uploaded_at}
+### Retrieval
+Two codepaths exist; only "PASS 1 + PASS 2 with chat" is active :
+
+1. retrieve_context(question, user_id, document_id, top_k=25, snippet_size=1400) → raw retrieved snippets (not actively invoked in chat() , but available if developer chooses to build prompts manually)
+2. Two-pass chat() internal flow:
+   - Query expansion first (4 variants): [original, lower, stripped, first-6-words, deduped, truncated to 4]
+   - Pass 1 : assistant.chat(messages=[{role:"user", content: final_prompt}], temperature=0, include_highlights=True, filter={user_id, document_id}, context_options={top_k=25, snippet_size=1400, queries: expanded_queries})
+   - If answer contains any "not found" indicators (via _is_not_found() checking against 6-phrase blacklist):
+     - Pass 2 : same call with top_k=40 , snippet_size=800 (more chunks, smaller window to find rare occurrences missed by larger chunks)
+   - Answer extracted from response.message.content (most common) with many fallbacks in _extract_answer()
+### Ranking
+Performed inside Pinecone Assistant's proprietary engine. Multiple queries in context_options is Pinecone's multi-query retrieval mode — all queries execute, their results are de-duplicated and merged by relevance.
+
+### Prompt injection
+Three layers of instructions stacked together during Pinecone's answer generation:
+
+1. Assistant stored instructions : set on assistant creation, stored permanently in Pinecone cloud (8 rules: "answer only from uploaded document; never guess; concise, accurate")
+2. Per-request user final_prompt : "Answer using uploaded document only. Question: {q}. Rules: 6 rules" — sent in messages[0].content
+3. Retrieved document chunks : Pinecone Assistant automatically injects chunks between instructions and the user question (this is hidden behavior, not visible in code)
+### Final LLM input
+Answer comes from Pinecone hosted LLM inside the Assistant (not the local zai-org/GLM-5.2). The result string is then returned to the worker as a plain tool function return value; the local GLM-5.2 sees it as a tool result item in the conversation history and uses it to craft the final spoken response. So there are TWO LLM calls per RAG tool invocation :
+
+1. Pinecone Assistant internal LLM → final document-grounded answer
+2. Worker's HuggingFace GLM-5.2 → combines tool result with conversation context to produce a user-facing utterance.
+## 14. TOOL CALLING
+### Every tool
+Tool 1: assign_name_2_speaker_ids(name: str)
+
+- Registration : Decorated @function_tool in worker.py L1000-1006 ( wrapped_assign_name_2_speaker_ids ), which wraps assign_name_2_speaker_ids L557-752, itself @function_tool decorated originally (L557), then wrapped with tool_wrapper() → status-sending wrapper L883-893 → finally wrapped in outer @function_tool L999-1006 for registration with Agent.
+- Purpose : Associates a spoken name with the current speaker's voice fingerprints. Required for conversation continuity across sessions.
+- When the LLM decides to call it : SYSTEM_PROMPT explicitly states: "Whenever an unknown speaker introduces themselves: Immediately call assign_name_2_speaker_ids before generating any response." Plus a list of name-introduction phrases: "My name is X, I am X, Call me X, This is X, Myself X".
+- Inputs : name: Annotated[str, "The name of the current speaker to remember"]
+- Output : Return string confirmation "Got it! I'll remember you as {name}."
+- Internal behavior : (1) normalize name (trim, strip punctuation, reject invalid words set). (2) await stt.get_speaker_ids() → fetch voice fingerprints. (3) normalize + dedupe. (4) check for identifier overlap with known speakers. (5) merge-or-create in known_speakers list. (6) save_speakers(SPEAKERS_FILE, updated_speakers) → persistent JSON write.
+- Status messages : Sends calling_tool: assign_name_2_speaker_ids before execution, then generating_response after.
+Tool 2: search_company_documents(question: str)
+
+- Registration : @function_tool L1008-1015 wraps search_company_documents L762-809, via the same tool_wrapper .
+- Purpose : Searches Pinecone uploaded document KB for answer to the user's document question.
+- When the LLM decides to call : SYSTEM_PROMPT states "When the user asks about: company documents, uploaded documents, internal policies, manuals, procedures, SOPs, enterprise knowledge, internal documentation → Always use search_company_documents".
+- Inputs : question: Annotated[str, "Question regarding uploaded company documents, policies, manuals, procedures, SOPs, internal knowledge base or enterprise documents"]
+- Output : Answer string from Pinecone Assistant OR user-facing error string (timeout/HTTP/network/generic error)
+- Internal behavior : httpx.AsyncClient(timeout=30.0).POST(settings.RAG_API_URL, json={question, user_id, document_id}) → FastAPI → PineconeService.chat (two-pass). Error handling: 5 explicit exception classes each with distinct user-facing error text (timeout, HTTP status, network request, generic).
+- Status messages : "calling_tool search_company_documents" before, "generating_response" after, "tool_failed" on exception.
+### Registration
+Tools are passed as list to Agent(tools=[...]) constructor (L1020). Agent holds them as FunctionTool instances with Pydantic schema. When HuggingFaceLLMStream initializes, it receives self._tools from the chat call, converts each to OpenAI-format schema with build_strict_openai_schema() .
+
+### Invocation
+1. LLM emits chunk with delta.tool_calls
+2. Worker code accumulates with partial_tool_calls dict; arguments JSON validation must succeed before emission
+3. flush_pending_tool_calls emits FunctionToolCall via _event_ch
+4. livekit-agents framework reads events; when finish_reason="tool_calls", invokes each FunctionTool: extracts name, JSON-parses arguments dict, matches to Python signature, awaits the coroutine
+5. Result string wrapped in conversation item "tool result"; appended to ChatContext
+6. Framework initiates a new LLM chat round automatically so model synthesizes final response from tool return
+### How LLM decides
+- Tool schema + SYSTEM_PROMPT rules are the only drivers of this decision. LLM (zai-org/GLM-5.2) has native function-calling training.
+- Triggering: hf_tool_choice="auto" lets the provider weigh. When SYSTEM_PROMPT explicitly says "Whenever X: Immediately call assign_name_2_speaker_ids before generating any response", LLM reliably emits tool calls on those patterns.
+- If tool-calling fails to emit: conversation would continue without tool. SYSTEM_PROMPT's error prevention section adds rules to discourage this.
+### Tool execution flow
+`LLM stream chunk with delta.tool_calls
+   ↓ (in HuggingFaceLLMStream)
+partial_tool_calls[index].arguments += func.arguments
+   ↓ (per-chunk)
+flush_pending_tool_calls() checks JSON validity
+   ↓ (when arguments are full JSON)
+emit ChatChunk(delta.tool_calls = [FunctionToolCall(name, args, call_id)])
+   ↓ (livekit-agents orchestrator)
+match name → FunctionTool instance
+   ↓
+deserialize arguments JSON → Python kwargs
+   ↓
+await wrapped_assign_name_or_search(kwargs)
+   │
+   ├─ send_agent_status("calling_tool", name)
+   ├─ await func(*args) (actual logic)
+   │    ├─ assign_name → stt.get_speaker_ids() + save_speakers()
+   │    └─ search_docs → httpx /api/rag/search → PineconeAssistant.chat
+   ├─ send_agent_status("generating_response")
+   └─ return string
+   ↓
+append tool result to ChatContext
+   ↓
+re-invoke HuggingFaceLLM.chat with updated context
+   ↓
+LLM produces final assistant text → TTS`
+
+### Return values
+Both tools return plain strings. The Agent framework appends them as "tool result" items (role=tool or role=system depending on framework) with the corresponding tool_call_id correlation so next LLM call sees the result bound correctly.
+
+## 15. CONVERSATION FLOW: MIC → SPEAKER (single spoken sentence)
+1. User speaks into microphone Browser getUserMedia({audio:true}) is called by livekit-client inside LiveKitRoom. Microphone track MediaStreamTrack ready; wrapped as LocalTrack.
+
+2. Local audio capture → encoding livekit-client captures 48kHz float32 samples → converts to OPUS 16kHz mono using built-in encoder → RTP packets.
+
+3. WebRTC transport to LiveKit Cloud ICE connected (STUN/TURN). Packets sent to wss://voice-agent-r9rofr3p.livekit.cloud . LiveKit SFU forwards subscribed tracks.
+
+4. Agent worker receives audio ctx.connect(AutoSubscribe.AUDIO_ONLY) subscribed to all audio. Worker side: AudioFrame events fire on subscribed remote track.
+
+5. Silero VAD detects speech start silero.VAD.load() 's ONNX model silero_vad.onnx processes each frame → speech probability crosses threshold.
+
+6. Session → "listening" state AgentSession internal FSM transitions. agent_state_changed event fired:
+
+`@session.on("agent_state_changed")
+def on_agent_state_changed(event):
+    new_state = event.new_state
+    if new_state in ["listening","speaking","thinking"]:
+        asyncio.create_task(send_agent_status(new_state))`
+
+send_agent_status("listening") → local_participant.publish_data('{"type":"agent_status","status":"listening"}') → data channel → Frontend.
+
+7. Speechmatics streaming STT Audio frames passed to Speechmatics STT plugin → WebSocket to Speechmatics Cloud → diarization + partial transcripts streamed back → plugin formats with <speaker>text</speaker> .
+
+8. VAD detects speech end + Smart Turn confirms end-of-turn Silero speech probability drops below threshold for sustained ms AND Smart-Turn model ( smart-turn-v3.1-cpu.onnx ) says "yes this is a turn boundary". Session finalizes the utterance.
+
+9. UserInputTranscribedEvent emitted
+
+`speaker_id = "Ty_Hardin"  (or "S1" if unknown)
+transcript  = "<Ty_Hardin>What is our company's remote work policy?</Ty_Hardin>"
+is_final    = True`
+
+Logged by on_user_input_transcribed .
+
+10. Session appends user conversation item AgentSession's internal conversation state → new ConversationItem(role="user", text_content="<Ty_Hardin>What is our…</Ty_Hardin>") .
+
+11. ChatContext constructed Includes SYSTEM_PROMPT + all history + latest user item.
+
+12. HuggingFace LLM call llm_instance.chat(chat_ctx, tools=[schema_of_assign, schema_of_search], tool_choice="auto") → returns HuggingFaceLLMStream .
+
+Stream _run() :
+
+- Converts chat_ctx to OpenAI list
+- Converts tools to OpenAI JSON schemas
+- _generate_once() wraps sync HF call in asyncio.to_thread
+13. LLM identifies "company document → must use tool" SYSTEM_PROMPT DOCUMENT SEARCH rules fire → GLM-5.2 decides to call tool.
+
+14. LLM streams delta.tool_calls
+
+`chunk.choices[0].delta.tool_calls[0] = {
+    index: 0,
+    id: "call_abc",
+    function: {name: "search_company_documents", arguments: '{"question":"'}
+}`
+
+15. HuggingFaceLLMStream accumulates arguments → eventually valid JSON
+
+`arguments: '{"question":"What is our company remote work policy?"}' → json.loads OK`
+
+flush_pending_tool_calls : emits ChatChunk containing FunctionToolCall("search_company_documents", arguments, "call_abc"). On finish_reason="tool_calls" → forced flush.
+
+16. Tool wrapper executes
+
+`send_agent_status("calling_tool", "search_company_documents")
+   → frontend shows 🔧 Please wait, Calling Tool: search_company_documents... + spinner`
+
+17. HTTP to FastAPI /api/rag/search httpx.AsyncClient(timeout=30).POST(http://localhost:8000/api/rag/search, json={question, user_id:"default_user", document_id:"3fa09985-...f1dd5db75e11"})
+
+18. PineconeService.chat() executes two-pass retrieval
+
+- _expand_queries() : 4 query variants
+- Pass 1: assistant.chat(messages=[{role:"user", content: final_prompt}], temperature=0, filter={user_id, document_id}, context_options={top_k=25, snippet_size=1400, queries: expanded})
+- Pinecone cloud internally: chunk retrieval → re-rank → hosted LLM synthesizes answer from context + instructions
+- If "Not found" → Pass 2, top_k=40, snippet_size=800
+- _extract_answer() → answer string: "Employees are eligible for up to 2 days per week of remote work with manager approval."
+19. Return value → session's ChatContext Tool returns answer string. Orchestrator appends result as ConversationItem(role=tool_result, content=answer, tool_call_id="call_abc").
+
+20. LLM second call (synthesize reply from tool result) Framework re-triggers HuggingFaceLLM.chat() with appended tool result. Now GLM-5.2 sees both user question and tool answer in history → streams delta.content = "According to the document, you can work remotely up to 2 days a week with your manager's approval."
+
+21. ChatChunk text events → session feeds TTS Each ChatChunk's delta.content accumulates by AgentSession; chunks are fed progressively to Cartesia TTS.
+
+22. Cartesia TTS streaming → audio frames Cartesia websocket → audio chunks received by plugin.
+
+23. Agent participant's audio track Session creates LocalAudioTrack for the agent, audio frames pushed into source → LiveKit server.
+
+24. ANAM Avatar video synchronized AvatarSession listens to audio stream → sends audio to ANAM cloud → receives talking-head video → publishes as video track on "anam-avatar-agent" participant.
+
+25. Agent state "speaking" broadcast agent_state_changed event → new_state = speaking → send_agent_status("speaking") data message.
+
+26. Frontend receives audio + video a) RoomAudioRenderer attaches agent audio to WebAudio → browser speakers.
+b) ParticipantView's trackSubscribed handler on avatar video track → track.attach(videoRef.current) → <video> element renders synchronized talking head.
+c) Status bar shows 🔊 Speaking... + orange wave animation.
+
+27. TTS completes Cartesia stream ends. Track audio buffer drains. Agent transitions speaking → listening. agent_state_changed event fires with old_state=speaking, new_state=listening.
+
+```
+if new_state == "listening" and 
+old_state == "speaking":
+    logger.info(f"[TTS END] Text: '
+    {current_agent_response[0]}'")
+```
+send_agent_status("listening") → frontend returns to 👂 Listening...
+
+Loop is ready for the next user utterance.
+
+
+
+## 16. EXTERNAL SERVICES
+Service API Key Env Var Purpose Initialization File Usage Location LiveKit Cloud LIVEKIT_URL , LIVEKIT_API_KEY , LIVEKIT_API_SECRET WebRTC server for real-time room management, audio/video tracks, data channels, and job dispatch to workers config.py token.py for token generation; worker.py for worker connection via cli.run_app() Speechmatics SPEECHMATICS_API_KEY Real-time Streaming Speech-to-Text (STT) with speaker diarization, speaker identification, and SMART_TURN detection config.py worker.py STT(...) constructor with TurnDetectionMode.SMART_TURN Cartesia CARTESIA_API_KEY , CARTESIA_VOICE_ID Neural Text-to-Speech (TTS) with streaming audio output, voice ID 56e35e2d-6eb6-4226-ab8b-9776515a7094 config.py + os.getenv worker.py cartesia.TTS(voice=CARTESIA_VOICE_ID) Hugging Face Inference API HF_TOKEN , HF_LLM_MODEL LLM inference via huggingface_hub.InferenceClient . Active model: zai-org/GLM-5.2 (provider="auto" auto-routes to best inference endpoint) config.py worker.py HuggingFaceLLM.__init__ → InferenceClient(...) ; also hf_llm.py standalone service Google API GOOGLE_API_KEY Listed in config but not actively used in current codebase. Originally intended for google-genai / Gemini 2.5 Flash Lite (per README) but superseded by HF GLM-5.2 config.py Unused in active code paths Deepgram DEEPGRAM_API_KEY Listed in config but not actively used . livekit-plugins-deepgram installed but Speechmatics is the active STT config.py Unused in active code paths (dependency installed only) ANAM (Avatar) ANAM_API_KEY , ANAM_AVATAR_ID Real-time talking video avatar generation. Avatar ID: fd1485b5-a07c-477b-b233-4287cc55b629 os.getenv reads in worker.py worker.py anam.AvatarSession(PersonaConfig(...)).start(session, room=ctx.room) Pinecone PINECONE_API_KEY Vector database with Pinecone Assistant (managed RAG) for PDF document ingestion, embedding, chunking, context retrieval, and LLM chat with filters. Assistant name: voice-agent-rag config.py pinecone_service.py Pinecone(api_key=...) → assistant.upload_file / context / chat / delete_file Silero VAD (local) No API key, model files in .models/ Local Voice Activity Detection ONNX model ( silero_vad.onnx ) with Smart Turn smart-turn-v3.1-cpu.onnx worker.py worker.py silero.VAD.load()
+
+## 17. ENVIRONMENT VARIABLES
+All variables are defined in .env and loaded via pydantic-settings.BaseSettings + python-dotenv in config.py .
+
+Variable Type Default Purpose Files Reading It LIVEKIT_URL str required LiveKit Cloud WebSocket endpoint (wss://...) config.py → token.py returns to frontend; worker auto-reads via LK env LIVEKIT_API_KEY str required LiveKit project API key config.py → token.py AccessToken(...) LIVEKIT_API_SECRET str required LiveKit project API secret config.py → token.py JWT signing GOOGLE_API_KEY str required by Settings (but unused) Google GenAI/Gemini key (legacy) config.py — no active consumer DEEPGRAM_API_KEY str required by Settings (but unused) Deepgram STT key (legacy, replaced by Speechmatics) config.py — no active consumer CARTESIA_API_KEY str required Cartesia TTS API key config.py ; read implicitly by livekit-plugins-cartesia from env var SPEECHMATICS_API_KEY str required Speechmatics RT STT key config.py → worker.py STT(api_key=settings.SPEECHMATICS_API_KEY) ANAM_API_KEY str required ANAM Avatar API key config.py → worker.py os.getenv("ANAM_API_KEY") ANAM_AVATAR_ID str required ANAM pre-uploaded avatar configuration ID config.py → worker.py os.getenv("ANAM_AVATAR_ID") PINECONE_API_KEY Optional[str] None Pinecone vector DB + Assistant API key config.py → pinecone_service.py ASSISTANT_NAME str "voice-agent-rag" Pinecone Assistant name (created if missing) config.py → pinecone_service.py RAG_API_URL str "http://localhost:8000/api/rag/search" Internal FastAPI RAG endpoint called by worker tool config.py → worker.py httpx.AsyncClient.post(settings.RAG_API_URL, ...) HF_TOKEN str os.getenv fallback Hugging Face API token for InferenceClient config.py → worker.py ; hf_llm.py HF_LLM_MODEL str os.getenv fallback Active LLM model name. Currently active: zai-org/GLM-5.2 config.py → worker.py ; hf_llm.py ; LLM_Test.py CARTESIA_VOICE_ID str os.getenv fallback Cartesia voice preset ID. Currently active: 56e35e2d-6eb6-4226-ab8b-9776515a7094 config.py → worker.py
+
+Loading sequence : config.py load_dotenv() at import → config.py instantiates settings = Settings() → Pydantic BaseSettings validates + logs all variables → settings singleton imported everywhere.
+
+## 18. COMPLETE SEQUENCE DIAGRAM (Text-Based)
+## 19. IMPORTANT CLASSES
+### 19.1 Settings — config.py
+- Base : pydantic_settings.BaseSettings
+- Responsibility : Validates and strongly types all environment variables as a singleton.
+- Key fields : LIVEKIT_URL , LIVEKIT_API_KEY , LIVEKIT_API_SECRET , SPEECHMATICS_API_KEY , CARTESIA_API_KEY , ANAM_API_KEY , ANAM_AVATAR_ID , PINECONE_API_KEY , ASSISTANT_NAME="voice-agent-rag" , RAG_API_URL="http://localhost:8000/api/rag/search" , HF_TOKEN , HF_LLM_MODEL="zai-org/GLM-5.2" , CARTESIA_VOICE_ID
+- Instantiated at : config.py settings = Settings()
+### 19.2 HuggingFaceLLM — worker.py
+- Base : livekit.agents.llm.LLM (abstract)
+- Responsibility : Custom LLM provider plugin for LiveKit Agents that wraps huggingface_hub.InferenceClient with streaming + tool calling.
+- Properties :
+  - model (str): returns zai-org/GLM-5.2
+  - provider (str): returns "huggingface"
+- Constructor params : model , api_key , provider="auto" , temperature=0.7 , max_tokens=1024
+- Key method : chat(chat_ctx, tools, conn_options, ...) → returns HuggingFaceLLMStream
+- Key method : aclose() → no-op (pass)
+### 19.3 HuggingFaceLLMStream — worker.py
+- Base : livekit.agents.llm.LLMStream (abstract)
+- Responsibility : Async streaming iterator that converts HF server-sent chunks into ChatChunk objects on _event_ch for consumption by LiveKit Agent pipeline. Implements tool call accumulation, JSON validation, deduplication, and retry logic.
+- Constructor params : llm , chat_ctx , tools , conn_options , client , model , temperature , max_tokens , tool_choice
+- Key methods :
+  - _generate_once(chat_ctx_list, openai_tools, hf_tool_choice) [L202-418]: Single streaming attempt. Iterates chunks. Accumulates partial_tool_calls[index] . Calls flush_pending_tool_calls() when JSON valid and finish_reason or end-of-stream. Returns (success: bool, full_response: str) .
+  - _run() [L420-501]: Outer loop. Converts chat_ctx → OpenAI format via chat_ctx.to_provider_format(format="openai") . Retries _generate_once() up to 3 times on failure. Finally emits hardcoded fallback on exhaustion. Closes _event_ch .
+- Inner helper : flush_pending_tool_calls() [L221-264]: Validates JSON arguments with json.loads() . Creates llm.FunctionToolCall(type="function", name, arguments, call_id, extra=None) . Emits ChatChunk(id, delta=ChoiceDelta(content=None, role="assistant", tool_calls=[...])) on _event_ch . Prevents duplicate emit via emitted_call_ids set.
+### 19.4 PineconeService — pinecone_service.py
+- Singleton : pinecone_service.py pinecone_service = PineconeService()
+- Responsibility : Two-pass RAG using Pinecone Assistant (managed RAG) with query expansion and lazy Pinecone client init.
+- Lazy init properties : pc (Pinecone SDK client), assistant (Pinecone Assistant instance for name voice-agent-rag )
+- Key methods :
+  - _initialize() [L16-23]: Creates Pinecone(api_key=settings.PINECONE_API_KEY) , calls _get_or_create_assistant()
+  - _get_or_create_assistant() [L35-61]: pc.assistant.describe_assistant(ASSISTANT_NAME) → if 404, creates with 8-rule enterprise-doc instructions
+  - upload_file(file_path, user_id, document_id) [L63-87]: self._assistant.upload_file(file_path, metadata={type,user_id,document_id,workspace_id})
+  - _expand_queries(question) [L89-111]: Returns 4 variants (original, lower, punct-stripped, first-6-words), deduped
+  - _extract_answer(response) [L113-139]: Heuristic navigation of response.message.content / response.messages[-1] / dict keys
+  - _is_not_found(text) [L141-154]: Checks 6 "not found" substrings
+  - retrieve_context(question, user_id, document_id, top_k, snippet_size) [L156-181]: self._assistant.context(query, top_k, snippet_size, filter={user_id, document_id})
+  - chat(question, user_id, document_id) [L197-310]: Two-pass retrieval . Pass1: top_k=25, snippet_size=1400 with expanded_queries as context_options.queries . If answer "not found", Pass2: top_k=40, snippet_size=800. Temp=0.0 always.
+  - delete_file(document_id) [L183-196]: self._assistant.delete_file(document_id)
+### 19.5 DocumentRegistry — document_registry.py
+- Singleton : document_registry.py document_registry = DocumentRegistry()
+- Responsibility : Local JSON file-backed (no DB) metadata registry for uploaded documents (mirrors Pinecone docs)
+- Storage path : backend/storage/documents.json
+- Key methods :
+  - _load_documents() : json.load from disk
+  - _save_documents(documents) : json.dump with indent=2
+  - save_document(document_id, document_name) : appends {document_id, document_name, uploaded_at: isoformat}
+  - list_documents() : returns [{document_id, document_name}] (strips timestamps)
+  - get_document(document_id) : lookup by id
+  - delete_document(document_id) : filter-and-rewrite; returns bool success
+### 19.6 VoiceRoom (React Function Component) — VoiceRoom.jsx
+- Frameworks : React 18 + hooks, @livekit/components-react
+- Responsibility : Entry UI component. Renders join form OR <LiveKitRoom> connected view based on isConnected state.
+- State variables : roomName (random default), identity="default_user" , isConnected , token , url , status , selectedDoc (from localStorage)
+- Key function : handleConnect() [L50-82]: builds metadata, calls getToken() , updates state
+- Rendered children : ConnectedView (inside <LiveKitRoom> provider), <RoomAudioRenderer/> , <ControlBar/>
+### 19.7 ConnectedView (React Function Component) — VoiceRoom.jsx
+- Context hooks : useConnectionState() , useVoiceAssistant() , useRoomContext() , useLocalParticipant() , useParticipants() from @livekit/components-react
+- Own state : detailedState = { status: 'idle', toolName: null } — driven by dataReceived data-channel events from worker
+- Key useEffect hooks :
+  - [L215-238]: Subscribes to room dataReceived event → parses JSON payload with type:"agent_status" → updates detailedState
+  - [L255-258]: useConnectionState → syncs status text
+  - [L261-272]: Logs localParticipant + microphoneTrack publish diagnostics
+  - [L275-282]: Logs remoteParticipants (used to locate agent participant avatar)
+  - [L285-315]: Debug handlers for participantConnected/Disconnected , trackSubscribed/Unsubscribed
+- Participant classification [L348-375]:
+  - agentParticipant : FIRST p.identity === 'anam-avatar-agent' , else fall back to agent-* prefix or voice-agent-rag
+  - otherParticipants : excludes avatar
+  - allHumanParticipants : local + filtered remotes, deduped by identity
+- Sub-components rendered : ParticipantView(agentParticipant, isAgent=true) , status display with conditional animations (wave, dots, spinner)
+### 19.8 ParticipantView (React Function Component) — VoiceRoom.jsx
+- Responsibility : Attaches subscribed video/audio tracks to DOM elements.
+- Refs : videoRef , audioRef
+- useEffect [L478-522]:
+  - Registers trackPublished , trackSubscribed , trackUnsubscribed listeners on participant
+  - On trackSubscribed : if track.kind === 'video' → track.attach(videoRef.current) ; 'audio' → track.attach(audioRef.current)
+  - Immediately attaches already-subscribed tracks from participant.tracks.values() on mount
+  - Cleanup on unmount: .off() all listeners → track.detach(...)
+- Render : <video autoPlay playsInline muted> + <audio autoPlay> for isAgent=true; otherwise null
+### 19.9 DocumentManager (React Function Component) — DocumentManager.jsx
+- Responsibility : Full CRUD UI for document upload/select/delete.
+- State : documents[] , selectedDocId , selectedDocName , uploading: bool , loading: bool
+- Key functions :
+  - loadDocuments() [L23-33]: await listDocuments() → setDocuments
+  - handleFileUpload(e) [L40-54]: FormData → uploadDocument(file) → refresh
+  - handleSelectDocument(doc) [L57-62]: Stores in localStorage ( selectedDocumentId , selectedDocumentName )
+  - handleDeleteDocument(docId) [L65-80]: confirm() → deleteDocument() → clear localStorage if was selected
+## 20. IMPORTANT FUNCTIONS
+### 20.1 generate_token(request: TokenRequest) -> TokenResponse — token.py
+- Inputs : { identity: str, room_name: str, metadata: dict | None } (Pydantic TokenRequest )
+- Outputs : { token: JWT_str, url: LIVEKIT_URL_str } (Pydantic TokenResponse )
+- Called by : Frontend getToken() in api.js via POST /token
+- Purpose : Constructs signed LiveKit JWT using api.AccessToken with VideoGrants(room_join=True, room=room_name) , optionally attaches JSON metadata. Measures perf latency.
+### 20.2 entrypoint(ctx: JobContext) — worker.py
+- Inputs : ctx: JobContext (provided by LiveKit worker framework)
+- Outputs : None (runs as long-running async task until room ends)
+- Called by : cli.run_app(WorkerOptions(entrypoint_fnc=entrypoint)) at worker.py
+- Calls internally :
+  - ctx.add_shutdown_callback(on_shutdown) → sets shutdown cleanup
+  - ctx.connect(AutoSubscribe.AUDIO_ONLY) → agent joins room
+  - Defines check_and_delete_room() [L828-851] (filter human participants, ctx.delete_room() if 0 left)
+  - Defines send_agent_status(status, tool_name?) [L866-880] → ctx.room.local_participant.publish_data(json.dumps(payload), reliable=True) data channel
+  - Defines tool_wrapper(func, tool_name) [L883-893] → wraps tools with status events
+  - Registers @ctx.room.on("participant_connected" / "participant_disconnected" / "track_published" / "track_subscribed") (sync)
+  - ctx.wait_for_participant() → blocks until human joins
+  - Parses participant.metadata JSON → writes global participant_metadata = {user_id, document_id}
+  - stt = STT(...) (Speechmatics)
+  - Creates wrapped @function_tool versions
+  - Creates Agent(instructions=SYSTEM_PROMPT, tools=[...])
+  - Creates HuggingFaceLLM(...)
+  - Creates AgentSession(stt, llm, tts=cartesia.TTS(), vad=silero.VAD.load(), preemptive_generation=False)
+  - Registers @session.on("user_input_transcribed" / "conversation_item_added" / "agent_state_changed")
+  - Optionally anam.AvatarSession(...).start(session, room=ctx.room)
+  - session.start(agent=agent, room=ctx.room, room_input_options=RoomInputOptions(close_on_disconnect=False)) → main run loop
+### 20.3 assign_name_2_speaker_ids(name: str) -> str — worker.py
+- Decorator : @function_tool
+- Inputs : name: str (Annotated docstring: "The name of the current speaker to remember")
+- Outputs : Natural language confirmation string (e.g. "Got it! I'll remember you as John." ) OR failure message
+- Called by : LLM search_company_documents tool call flow (LiveKit Agent framework invokes it)
+- Internal steps :
+  1. Normalize name: strip .,!?"' , collapse whitespace, reject INVALID_NAMES set
+  2. stt.get_speaker_ids() → raw Speechmatics voice fingerprints
+  3. normalize_speaker_ids(raw_speaker_ids) → flat List[str]
+  4. Dedupe → dict.fromkeys
+  5. Check if speaker identifiers overlap any existing known_speakers[*].speaker_identifiers
+     - If overlap with same label → merge identifiers (union)
+     - If overlap with DIFFERENT label → return error: voice already recognized as other person
+     - Else label match found → merge ids
+     - Else create new SpeakerIdentifier(label=name, speaker_identifiers=[...])
+  6. Persist: save_speakers(SPEAKERS_FILE, updated_speakers) → writes backend/speakers.json
+### 20.4 search_company_documents(question: str) -> str — worker.py
+- Decorator : @function_tool
+- Inputs : question: str (Annotated: "Question regarding uploaded company documents, policies, manuals, procedures, SOPs, internal knowledge base or enterprise documents")
+- Outputs : Answer string OR human-friendly error string
+- Called by : LLM tool dispatch; wrapper via tool_wrapper() at L883-893
+- Internal flow :
+  - httpx.AsyncClient(timeout=30.0).post(settings.RAG_API_URL, json={question, user_id, document_id})
+  - Error handling branches: TimeoutException → "took too long"; HTTPStatusError → "error searching"; RequestError → "couldn't connect"; generic Exception → fallback
+  - Success: response.json()["answer"] returned
+### 20.5 rag_search(request: RagQueryRequest) -> RagQueryResponse — rag.py
+- Inputs : RagQueryRequest { question, user_id, document_id }
+- Outputs : RagQueryResponse { answer: str }
+- Called by : POST /api/rag/search from worker search_company_documents()
+- Purpose : FastAPI HTTP bridge → pinecone_service.chat(question, user_id, document_id)
+### 20.6 upload_document(file: UploadFile) — documents.py
+- Inputs : FastAPI UploadFile (must be .pdf )
+- Outputs : { success: bool, document_id: uuid, document_name: str }
+- Called by : Frontend uploadDocument() via POST /api/documents/upload
+- Flow : Validates .pdf suffix → saves to backend/temp/{uuid}_{filename}.tmp → pinecone_service.upload_file(file_path, user_id="default_user", document_id) → document_registry.save_document() → finally: temp_file_path.unlink()
+### 20.7 list_documents() / delete_document(document_id) — documents.py
+- GET /api/documents → document_registry.list_documents()
+- DELETE /api/documents/{document_id} → pinecone_service.delete_file(document_id) + document_registry.delete_document(document_id)
+### 20.8 load_known_speakers(file_path: Path) -> list[SpeakerIdentifier] — speaker_utils.py
+- Inputs : Path to speakers.json
+- Outputs : list[SpeakerIdentifier] (validated/cleaned)
+- Called by : entrypoint() at worker.py
+- Flow : File missing → creates empty JSON; parses each entry. For each entry: validates label: str , validates/cleans speaker_identifiers list to strings-only via validate_speaker_identifiers() .
+### 20.9 save_speakers(file_path: Path, speakers: list[SpeakerIdentifier]) -> None — speaker_utils.py
+- Inputs : file path + speaker list
+- Outputs : None (writes JSON with indent=2, ensure_ascii=False)
+- Called by : assign_name_2_speaker_ids() at worker.py after modifying speakers
+### 20.10 normalize_speaker_ids(raw_ids: Any) -> List[str] — speaker_utils.py
+- Inputs : Any shape expected from Speechmatics get_speaker_ids()
+  - Old format: ["id1", "id2"]
+  - New format: [{"label": "S1", "speaker_identifiers": ["id1"]}, ...]
+- Outputs : Deduped flat List[str] , no dicts, invalid entries filtered
+- Called by : assign_name_2_speaker_ids() at worker.py
+- Algorithm : Iterate entries; if str → add; if dict → flatten .speaker_identifiers[] ; otherwise warn and skip
+### 20.11 getToken(identity, roomName, metadata) — api.js
+- Inputs : identity: string , roomName: string , metadata: object|null
+- Outputs : Promise resolving to { token, url }
+- Called by : VoiceRoom.handleConnect() at VoiceRoom.jsx
+### 20.12 handleConnect() — VoiceRoom.jsx
+- Inputs : None (event handler)
+- Outputs : side-effect (mutates state)
+- Flow : setStatus("Connecting...") → constructs metadata object (with selectedDoc.id/name or default_doc ) → getToken(identity, roomName, metadata) → setToken/token/url/isConnected → setStatus("Connected")
+## 21. DATA FLOW
+### 21.1 Audio Flow
+### 21.2 Text Flow
+### 21.3 Token Flow (LiveKit JWT)
+### 21.4 Message Flow (Chat Context)
+ChatContext is in-memory inside HuggingFaceLLM.chat() / HuggingFaceLLMStream._run() :
+
+1. SYSTEM_PROMPT (always first, role=system)
+2. Historical role=user messages (formatted transcripts with speaker tags)
+3. Historical role=assistant messages (LLM text output)
+4. Historical role=tool messages (tool returns) — with tool_call_id reference
+5. Interleaved role=assistant messages containing ONLY tool_calls: [{id,type,function:{name,arguments}}] (no content)
+Conversion to provider format: chat_ctx.to_provider_format(format="openai") at worker.py L425 — produces OpenAI-compatible messages[] consumable directly by InferenceClient.chat.completions.create .
+
+### 21.5 Event Flow
+Room events:
+
+Session events (AgentSession):
+
+### 21.6 Tool Response Flow
+### 21.7 RAG Document Flow
+Document Ingestion:
+
+Document Retrieval (during RAG chat):
+
+## 22. ERROR HANDLING
+### 22.1 Connection Failures (Frontend ↔ Backend)
+- Token request fails : getToken() throws Error('Failed to get token') if response not 2xx.
+- Handler at VoiceRoom.jsx L78-81 : catch block logs error, sets status to 'Connection failed' .
+- LiveKitRoom connection state : useConnectionState() hook at L255-258 continuously reflects real state (disconnected, connecting, connected, reconnecting). UI shows state in header status indicator.
+### 22.2 Worker Failures / Room Cleanup
+- Participant disconnect : on_participant_disconnected fires check_and_delete_room() wrapped in asyncio.create_task() at worker.py L932 .
+- Room deletion guard : room_deleted nonlocal boolean flag at worker.py L826-851 prevents double-delete (could error).
+- ctx.add_shutdown_callback(on_shutdown) at L854-858: fires when worker process itself is gracefully killed; runs check_and_delete_room() one last time.
+- Human detection filter : p.identity.startswith("agent-") or identity=="voice-agent-rag" are excluded from "human participants" check — ensures avatar/agent participants don't keep room alive.
+### 22.3 LiveKit Disconnects
+- Session started with RoomInputOptions(close_on_disconnect=False) at worker.py L1161 — keeps agent session alive briefly across transient participant disconnects.
+- ControlBar in frontend provides built-in reconnection handled by livekit-client .
+### 22.4 STT Failures (Speechmatics)
+- stt.get_speaker_ids() failure inside assign_name_2_speaker_ids at worker.py L627-L632 : caught → returns human-readable "I heard your name is X, but I couldn't save it because speaker identification failed." — does NOT crash the session.
+- Empty speaker_ids list → L634-L639: "I heard your name is X, but I couldn't identify your voice yet."
+- STT module itself initialized with explicit api_key=settings.SPEECHMATICS_API_KEY at L988; import-time load_dotenv ensures env present.
+### 22.5 LLM Failures (HuggingFace Inference)
+- 3 retries loop inside HuggingFaceLLMStream._run() worker.py L466-L477 : each retry calls _generate_once() again; after 3 failures, emits hardcoded fallback: via _event_ch.send_nowait() at L479-487 — pipeline stays alive , user just gets an apologetic sentence instead of silent crash.
+- Per-chunk parse protection : try/except wraps chunk parsing in _generate_once L399-403 → logs warning, continue next chunk (skips malformed chunk instead of aborting entire stream).
+- Event channel close protection in finally: L490-500: attempts both .aclose() / .close() variants; ignores close exceptions.
+- HF_TOKEN validation at L1033-1035 pre-session-start: raises ValueError("HF_TOKEN is required") before room session started (hard fail = loud fail, prevents bad sessions).
+### 22.6 RAG Tool Failures
+- 4 categorized error branches in search_company_documents worker.py L794-809 :
+  - httpx.TimeoutException (30s elapsed) → "took too long, try later"
+  - httpx.HTTPStatusError (4xx/5xx from backend) → "error searching docs, try later"
+  - httpx.RequestError (DNS / connection refused / no route) → "couldn't connect to service"
+  - Generic Exception → "something went wrong"
+    Tool never throws uncaught; always returns error string. This is critical because the LLM sees the tool return and can comment on it in the second call rather than the whole pipeline exploding.
+### 22.7 PineconeService Errors
+- PINECONE_API_KEY missing → ValueError inside _initialize() at pinecone_service.py L18-19 .
+- _get_or_create_assistant → broad except Exception at L43 wraps create_assistant if describe fails.
+- delete_file → L195 warning log if Pinecone fails (tolerates stale delete).
+- chat two-pass: any exception → logged with duration then raise to API layer which returns 500 to worker → caught as HTTPStatusError → tool returns user-safe string.
+### 22.8 Timeout Logic
+- RAG tool HTTP: httpx.AsyncClient(timeout=30.0) — hard 30-second timeout for entire request/response lifecycle.
+- LiveKit JWT: expiration is default (6 hours by livekit-api AccessToken default).
+### 22.9 Retry Logic Summary
+Failure Point Retry Strategy Location HF LLM inference 3 retries, unconditional per attempt worker.py L466-477 Pinecone RAG not-found 2-pass retrieval with different top_k/snippet_size pinecone_service.py L263-291 RAG HTTP/network errors No retry (single-shot; user can re-ask) worker.py L794-L806
+
+## 23. TECHNOLOGIES USED
+Technology Version Purpose File Where Used React ^18.2.0 Frontend UI framework, hooks (useState, useEffect, useRef) package.json ; App.jsx ; VoiceRoom.jsx ; DocumentManager.jsx React DOM ^18.2.0 DOM renderer for React package.json ; main.jsx React Router DOM ^7.17.0 SPA routing: / → VoiceRoom, /documents → DocumentManager package.json ; App.jsx Vite ^5.0.8 Frontend build tool + dev server (HMR, ESM) package.json ; scripts dev , build , preview @vitejs/plugin-react ^4.2.1 React Fast Refresh for Vite package.json livekit-client ^2.3.0 WebRTC room client, track mgmt, participant/track events package.json ; used internally by @livekit/components-react @livekit/components-react ^2.3.0 React component library for LiveKit: <LiveKitRoom> , <ControlBar> , <RoomAudioRenderer> , hooks useVoiceAssistant , useConnectionState , useRoomContext , useLocalParticipant , useParticipants package.json ; VoiceRoom.jsx imports @livekit/components-styles ^1.2.0 Default CSS for LK components package.json ; main.jsx Python 3.11+ Backend runtime (all .py files) README.md FastAPI 0.136.3 REST API backend framework (token, rag, documents routes) requirements.txt ; main.py ; all route files Uvicorn 0.49.0 ASGI server for FastAPI requirements.txt ; start cmd uvicorn app.main:app --reload Starlette 1.2.1 FastAPI underlying ASGI toolkit requirements.txt livekit-agents 1.5.17 LiveKit Python Agent framework core — Agent , AgentSession , JobContext , WorkerOptions , cli , function_tool , ChatContext , events requirements.txt ; worker.py livekit 1.1.8 Core LiveKit Python RTC client (Room, Participant, Track bindings) requirements.txt ; imported transitively by livekit-agents livekit-api 1.1.0 AccessToken & server API (used by /token route) requirements.txt ; token.py livekit-plugins-speechmatics 1.5.17 Speechmatics STT plugin: STT , SpeakerIdentifier , TurnDetectionMode.SMART_TURN , stt.get_speaker_ids() requirements.txt ; worker.py , L51-L52, L982-L989 livekit-plugins-cartesia 1.5.17 Cartesia TTS plugin: cartesia.TTS(voice=...) requirements.txt ; worker.py livekit-plugins-silero 1.5.17 Silero VAD plugin: silero.VAD.load() → local ONNX model requirements.txt ; worker.py import, L1056 usage livekit-plugins-anam (brought in by livekit-agents) ANAM Avatar: anam.AvatarSession , anam.PersonaConfig , avatar.start(session, room) worker.py from livekit.plugins import anam , L1138-L1148 livekit-plugins-deepgram 1.5.17 Deepgram STT plugin (installed, unused in favor of Speechmatics) requirements.txt livekit-plugins-google 1.5.17 Google STT/TTS plugins (installed, unused ) requirements.txt huggingface_hub 0.36.2 Hugging Face SDK: InferenceClient for LLM streaming chat completions with tool calls requirements.txt ; worker.py import+use; hf_llm.py zai-org/GLM-5.2 (via HF Inference) Active LLM model — Chinese/English reasoning model supporting tool calls Configured via HF_LLM_MODEL=zai-org/GLM-5.2 in .env ; used in InferenceClient.chat.completions.create(model=...) pydantic 2.13.4 Data validation — Settings class, TokenRequest, RagQueryRequest/Response requirements.txt ; config.py ; token.py ; rag.py pydantic-settings 2.14.1 .env file loader for BaseSettings requirements.txt ; config.py python-dotenv 1.2.2 load_dotenv() for .env parsing requirements.txt ; config.py ; worker.py L93 PyJWT 2.13.0 JWT signing used by livekit-api AccessToken requirements.txt httpx 0.28.1 Async HTTP client used by worker tool search_company_documents to call internal FastAPI /api/rag/search requirements.txt ; worker.py httpx.AsyncClient(...) aiohttp 3.14.1 Async HTTP (used transitively by LiveKit) requirements.txt Pinecone SDK 5.3.0 Vector DB + Assistant SDK: Pinecone(api_key) , .assistant.* API requirements.txt ; pinecone_service.py pinecone-plugin-assistant 3.0.3 Assistant API (managed RAG) requirements.txt pinecone-plugin-inference 1.1.0 Embedding inference plugin for Assistant requirements.txt speechmatics-rt 1.0.0 Speechmatics Real-Time WebSocket client (used under hood by livekit-plugins-speechmatics) requirements.txt speechmatics-voice 0.2.8 Speechmatics voice/identifiers module requirements.txt ONNX Runtime 1.26.0 Runs silero_vad.onnx VAD model locally requirements.txt av (PyAV) 17.1.0 Audio/video frame encoding/decoding (dependency of livekit-agents audio pipeline) requirements.txt numpy 2.4.6 Numeric processing for VAD, audio frames requirements.txt json_repair 0.59.10 Fault-tolerant JSON parsing (dependency ecosystem) requirements.txt python-multipart (unpinned) FastAPI file uploads parsing in /api/documents/upload endpoint requirements.txt ; documents.py UploadFile = File(...) nest-asyncio 1.6.0 Patches asyncio to allow nested event loops (avoids conflicts in some WSGI/thread scenarios) requirements.txt tenacity 9.1.4 Retry decorator library (dependency) requirements.txt typer 0.26.7 CLI framework used by livekit.agents.cli.run_app for python -m agent.worker dev requirements.txt ; worker.py cli import rich 15.0.0 Pretty terminal logging and CLI formatting requirements.txt watchfiles 1.2.0 Uvicorn --reload file watching requirements.txt transformers 4.57.6 HuggingFace transformers (dependency of blingfire / silero) requirements.txt ESLint (dev) ^8.55.0 Frontend linting package.json
+
+## 24. DEPENDENCIES — KEY LIBRARIES EXPLAINED
+### Core Frontend
+- react + react-dom : Declarative component-based UI framework with virtual DOM. All UI (VoiceRoom, DocumentManager, sub-components) is authored as functional React components using hooks.
+- react-router-dom : Enables multi-page feel in SPA. Two routes: / renders the voice conversation UI; /documents renders the document upload/management page with a back link.
+- vite : Ultra-fast bundler. Uses native ESM in dev for instant hot module reload. Builds optimized production bundles via Rollup.
+### LiveKit Frontend
+- livekit-client : The lowest-level WebRTC client. Creates Room objects, handles ICE/DTLS/SRTP, publishes local microphone tracks, subscribes to remote tracks, fires events for participants/tracks/data. Used by @livekit/components-react internally.
+- @livekit/components-react : Component/hook layer over livekit-client. <LiveKitRoom> is the provider component that connects to a room and exposes context. <ControlBar> renders mic/camera toggle buttons. <RoomAudioRenderer> auto-attaches remote audio tracks to hidden audio elements so speakers play automatically. Hooks like useVoiceAssistant() surface the voice agent's messages[] and agent state for rendering conversation transcript (though the current UI uses data-channel agent_status events and hides the old message list).
+### Core Backend Framework
+- fastapi : Modern async Python web framework. App created in main.py with CORS middleware and request logging middleware. Routers for /token , /api/rag/search , /api/documents/upload|list|delete .
+- uvicorn : Uvicorn is the production-grade ASGI server that runs FastAPI apps. uvicorn app.main:app --reload starts the backend in development mode with auto-reload on file change.
+- pydantic + pydantic-settings : Type-level data validation. All HTTP request/response bodies (TokenRequest, RagQueryRequest, etc.) and environment variables ( Settings class) are Pydantic models. Malformed data returns 422 with detailed errors automatically.
+### LiveKit Backend / Agent
+- livekit-agents : Most critical library. Provides the agent abstraction. Key exports:
+  - cli.run_app(WorkerOptions(entrypoint_fnc=...)) → starts the worker loop WebSocket to LiveKit Cloud
+  - JobContext → per-job context giving access to ctx.room , ctx.connect() , ctx.wait_for_participant() , ctx.delete_room() , ctx.add_shutdown_callback()
+  - Agent(instructions=..., tools=...) → represents the AI persona bound to AgentSession
+  - AgentSession(stt, llm, tts, vad, preemptive_generation) → the central pipeline orchestrator tying STT→LLM→TTS with VAD boundaries
+  - @function_tool decorator → converts Python functions into LLM-invocable tools; auto-derives JSON schema from type annotations
+  - ChatContext , Tool , FunctionTool , FunctionToolCall , ChatChunk , ChoiceDelta , LLM , LLMStream → LLM pipeline abstractions
+  - Event types: UserInputTranscribedEvent , ConversationItemAddedEvent
+- livekit-api : Provides api.AccessToken for JWT creation and api.VideoGrants for scoping tokens; used only in FastAPI /token endpoint.
+### LiveKit Plugins (Providers Implemented As)
+- livekit-plugins-speechmatics : Exports STT class that opens WebSocket to Speechmatics RT and pushes audio frames. Options used:
+  - turn_detection_mode=SMART_TURN → Speechmatics' hybrid VAD + ML turn endpoint detection (better than pure Silero for barge-in / short pauses)
+  - enable_diarization=True → speaker diarization (S1/S2 tags)
+  - speaker_active_format / speaker_passive_format → output format strings that template speaker IDs directly into transcript text
+  - known_speakers: list[SpeakerIdentifier] → previously saved (name → voiceprint) mappings to relabel S1→Ty Hardin
+  - stt.get_speaker_ids() → returns current speaker voiceprint identifiers (used by the name-assign tool)
+- livekit-plugins-cartesia : cartesia.TTS(voice=...) — streaming TTS that buffers sentence fragments and returns audio chunks in real-time; attached directly to the AgentSession.
+- livekit-plugins-silero : silero.VAD.load() — loads backend/.models/silero_vad.onnx + smart-turn-v3.1-cpu.onnx locally for real-time VAD.
+- livekit-plugins-anam : anam.AvatarSession(PersonaConfig(name, avatarId)).start(session, room=ctx.room) — automatically:
+  - Creates a dedicated room participant with identity "anam-avatar-agent"
+  - Publishes video track of the lip-synced avatar
+  - Subscribes to agent's TTS for synchronization
+  - Frontend ParticipantView finds the avatar by identity and attaches the video track to <video>
+### LLM
+- huggingface_hub : InferenceClient(provider="auto") — auto selects the best inference provider endpoint for the given model (e.g., Novita, Hyperbolic, Together, or HF native). client.chat.completions.create(model, messages, tools, tool_choice, stream=True, ...) returns a generator of SSE-delimited chunks compatible with OpenAI format.
+### RAG / Vector Search
+- pinecone : Official Pinecone 5.x Python SDK. Used features:
+  - Pinecone(api_key=...) constructor
+  - pc.assistant.describe_assistant / create_assistant / Assistant(assistant_name) → managed RAG "Assistant" feature (PDF ingestion → chunking → embedding → storage → LLM chat, all handled server-side by Pinecone)
+  - assistant.upload_file / list_files / delete_file / chat(query, filter, context_options, include_highlights) / context(...)
+- pinecone-plugin-assistant / pinecone-plugin-inference : plugins that add the Assistant API and Embedding Inference features to the base Pinecone client.
+### HTTP / Networking
+- httpx : Modern async HTTP with explicit timeout support (30s in the RAG tool). Used because requests is synchronous.
+- aiohttp : Async HTTP/WebSocket (dependency of LiveKit agent for internal HTTP calls).
+### Utilities
+- python-dotenv : load_dotenv() loads .env into os.environ before pydantic-settings.BaseSettings validates — this is why both os.getenv and Pydantic fields work.
+- PyJWT / cryptography : Dependencies of livekit-api for HS256 JWT signing of access tokens.
+- av (PyAV) : Python binding to FFmpeg; used by livekit-agents to encode/decode audio between WebRTC codec frames and raw PCM expected by STT/VAD/TTS plugins.
+- numpy + onnxruntime : Runtime for Silero VAD ONNX model. VAD inference runs on CPU with very low latency.
+- nest-asyncio : Patches asyncio to support nested loops — avoids "Cannot run event loop" errors when code that calls asyncio.run() executes inside an existing loop (common in agent tool execution and test scripts).
+- python-multipart : Adds multipart/form-data parsing to FastAPI — needed because PDF uploads use form file encoding.
+## 25. FINAL ARCHITECTURE SUMMARY
+The project is a 3-tier real-time voice-RAG assistant built on the LiveKit Agents framework , with WebRTC media transport, managed vector RAG (Pinecone Assistant), streaming HF-hosted LLM tool-calling inference, Speechmatics streaming diarized STT with speaker recognition, Cartesia streaming TTS, Silero local VAD, and an ANAM AI video avatar that lip-syncs to the TTS output.
+
+### Architecture Layers (Bottom-Up Stack)
+Layer 1 — Infrastructure / Media Transport (LiveKit Cloud) The entire real-time platform is hosted on a LiveKit Cloud project ( LIVEKIT_URL=wss://voice-agent-r9rofr3p.livekit.cloud ). LiveKit acts as:
+
+- SFU (Selective Forwarding Unit) for WebRTC audio/video tracks: browser mic → LiveKit → Worker (agent), and Worker published audio/avatar-video → LiveKit → browser
+- Room registry / lifecycle manager : rooms are created by first join, destroyed by ctx.delete_room() when all humans leave
+- Job Dispatcher : when a room is created and needs an agent (determined by LK server logic), the server notifies all registered workers; one worker picks the job and runs entrypoint(ctx)
+Layer 2 — FastAPI Backend (HTTP Server, port 8000) Run via uvicorn app.main:app --reload . The FastAPI server provides 4 API routes and 1 health route:
+
+1. POST /token ( token.py ): Input {identity, room_name, metadata} → creates a signed LiveKit JWT (HS256) using livekit.api.AccessToken with VideoGrants(room_join=True, room=room_name) and attaches user_id/document_id as JWT metadata. Returns JWT + LiveKit URL to frontend. This is the ONLY point where the LiveKit API secret is used for user-facing signing.
+2. POST /api/rag/search ( rag.py ): HTTP bridge from agent worker (tool) to PineconeService. Accepts {question, user_id, document_id} → calls pinecone_service.chat(...) → returns {answer} .
+3. POST /api/documents/upload ( documents.py ): Accepts PDF (multipart/form-data file upload) → saves temp → pinecone_service.upload_file (PDF ingested into Pinecone Assistant managed RAG: PDF parsing → chunking → embedding → vector upsert) → document_registry.save_document appends metadata JSON → temp file deleted.
+4. GET /api/documents → Lists documents registered in storage/documents.json.
+5. DELETE /api/documents/{document_id} → Deletes from Pinecone and registry.
+6. GET /health → returns {"status":"ok"} .
+Middleware: CORS ( allow_origins=["*"] — permissive for dev) and HTTP request/response logging middleware at main.py L26-39 .
+
+Layer 3 — LiveKit Python Agent Worker (separate process) Started via python -m agent.worker dev in a second terminal. Uses livekit.agents.cli.run_app(WorkerOptions(entrypoint_fnc=entrypoint)) to register as a LiveKit worker. When a job arrives:
+
+Entrypoint execution (all in worker.py ):
+
+1. Connection & Lifecycle Setup : Logs job/room. Registers shutdown callback on_shutdown with ctx.add_shutdown_callback() (per project rules — NO signal.signal allowed). Calls ctx.connect(AutoSubscribe.AUDIO_ONLY) .
+2. Room Event Wiring (synchronous handlers) : Registers participant_connected (extracts user/document metadata from participant JWT metadata into global participant_metadata dict), participant_disconnected (spawns check_and_delete_room async task), track_published / track_subscribed . Handlers are sync per LK constraints; async work uses asyncio.create_task .
+3. Wait for Human : await ctx.wait_for_participant() blocks until a non-agent participant joins. Parses metadata again to fill participant_metadata = {user_id, document_id} (the document selected in UI drives which Pinecone filter is used).
+4. STT Init : load_known_speakers(speakers.json) returns list[SpeakerIdentifier] — persistent speaker name-to-voiceprint memory. Constructs speechmatics.STT(turn_detection_mode=SMART_TURN, enable_diarization=True, speaker_active_format="<{speaker_id}>{text}</{speaker_id}>", speaker_passive_format="...", known_speakers=known_speakers, api_key=SPEECHMATICS_API_KEY) . The known_speakers cause Speechmatics to substitute S1 labels for stored names (e.g. <Ty Hardin>...</Ty Hardin> ) directly in the transcript text — this is how the LLM sees speaker identity.
+5. Tool Definition & Wrapping : Two @function_tool decorated functions are declared:
+   - assign_name_2_speaker_ids(name: str) -> str : Runs stt.get_speaker_ids() to get current speaker voiceprints, normalizes them via normalize_speaker_ids , dedupes, checks for collision against known_speakers, either updates existing or creates new SpeakerIdentifier , persists via save_speakers(speakers.json) . Returns a human-readable confirmation.
+   - search_company_documents(question: str) -> str : Calls FastAPI /api/rag/search via httpx.AsyncClient with global participant_metadata providing user_id and document_id filter. Error-handles httpx TimeoutException / HTTPStatusError / RequestError / generic Exception with separate user messages — never throws.
+     These tools are wrapped with tool_wrapper() which calls send_agent_status (before=calling_tool, after=generating_response) to publish status events over LiveKit data channel to the frontend. The wrappers are then decorated with @function_tool again to be registered with LLM.
+6. Agent : Agent(instructions=SYSTEM_PROMPT, tools=[wrapped_assign_name, wrapped_search_docs]) . SYSTEM_PROMPT (311 lines in prompts.py ) enforces concise responses, max 2 sentences, natural conversation, decision-making (3 pre-response reasoning steps), speaker recognition logic including <S1> tag semantics, rules for when a speaker is known vs unknown, when to call assign_name_2_speaker_ids (ONLY on self-introduction phrases like "I am X"), when to call search_company_documents (ONLY for company/policy/manual questions), and document access control (only Ty Hardin authorized — though this check is commented out at lines 285-310).
+7. LLM : Custom class HuggingFaceLLM(llm.LLM) wraps huggingface_hub.InferenceClient . Subclass HuggingFaceLLMStream(llm.LLMStream) implements the actual streaming logic:
+   - Converts chat_ctx → OpenAI format via to_provider_format("openai")
+   - Converts FunctionTools → OpenAI JSON schema via llm.utils.build_strict_openai_schema(tool)
+   - Runs asyncio.to_thread(client.chat.completions.create(model="zai-org/GLM-5.2", messages, tools, tool_choice, stream=True, max_tokens=1024, temperature=0.7))
+   - Iterates streaming chunks; for delta.content emits ChatChunk immediately on _event_ch for token-by-token TTS streaming
+   - For delta.tool_calls[] accumulates partial {index, call_id, name, arguments} strings; when JSON validates (via json.loads ) AND not already emitted, emits a ChatChunk containing FunctionToolCall with full validated arguments. This accumulation step is necessary because tool arguments stream word-by-word, and the agent framework can't parse partial JSON.
+   - _run() wraps this in 3-attempt retry loop; after 3 failures emits fallback sentence "I'm sorry, I couldn't generate a response right now. Please try again." and closes event channel.
+8. AgentSession Core Pipeline : AgentSession(stt=stt, llm=llm_instance, tts=cartesia.TTS(voice=CARTESIA_VOICE_ID), vad=silero.VAD.load(), preemptive_generation=False) . preemptive_generation=False means the agent waits for VAD+SMART_TURN to declare the user's utterance is ended before sending to LLM (safer/more accurate, slightly slower than preemptive).
+   Event handlers registered (sync callbacks):
+   - user_input_transcribed : logs speaker_id + transcript + is_final
+   - conversation_item_added : if role=assistant, logs TTS START with full text
+   - agent_state_changed : when new_state ∈ {listening, speaking, thinking}, calls send_agent_status(new_state) via asyncio task → data channel → frontend status UI. old=speaking→new=listening triggers TTS END log.
+9. Avatar : If ANAM_API_KEY + ANAM_AVATAR_ID env present, creates anam.AvatarSession(PersonaConfig(name="Assistant Avatar", avatarId=fd1485b5-a07c-477b-b233-4287cc55b629)).start(session, room=ctx.room) . This publishes an additional room participant anam-avatar-agent with a video track of the AI-generated head, synchronized to the agent's TTS audio output via direct hook into the AgentSession.
+10. session.start(agent, room, room_input_options=RoomInputOptions(close_on_disconnect=False)) → Enters main run loop. From this point onward, the LiveKit Agents framework orchestrates STT→VAD→LLM→Tool→LLM→TTS pipeline internally; our code only observes via session events.
+Layer 4 — RAG Service (PineconeService singleton)
+
+- Lazy initialization on first use. Constructs Pinecone client and calls _get_or_create_assistant(ASSISTANT_NAME="voice-agent-rag") — if the assistant doesn't exist in Pinecone, creates it with 8-rule prompt: answer only from doc, search headers/notes/appendix/tiny text, never guess, say "Not found in document", etc.
+- chat() implements a two-pass retrieval algorithm: Pass 1 searches with top_k=25 contexts + snippet_size=1400 using 4 query variants (query expansion via _expand_queries ). If answer contains "not found in document" (matched against 6 phrase variants), Pass 2 runs with top_k=40 and smaller snippet_size=800, which can often catch small-print or fragmented answers that Pass 1 missed. temperature=0.0 throughout ensures deterministic doc answers.
+- The actual embedding, chunking, vector storage, reranking, and LLM call for document QA all happen server-side inside Pinecone Assistant ; the Python code only sends queries and receives final answers. This means no local embedding model runs.
+Layer 5 — DocumentRegistry (local JSON)
+
+- Simple file-based registry at storage/documents.json mirroring Pinecone documents. This provides a fast local list for the frontend document manager page without needing Pinecone list APIs. Schema per row: {document_id, document_name, uploaded_at} .
+Layer 6 — Frontend (React + Vite, port 5173)
+
+- Boot : index.html → main.jsx mounts React root with <React.StrictMode><App/></React.StrictMode> . Imports @livekit/components-styles + global styles.
+- App : Router at / → VoiceRoom , /documents → DocumentManager .
+- DocumentManager page : Uploads PDF via FormData → uploadDocument(file) . Lists docs, selects one (saves id/name to localStorage), deletes. Selected document is loaded from localStorage by VoiceRoom on next mount.
+- VoiceRoom page : Either shows join form (roomName random default, identity="default_user") OR once connected wraps everything in <LiveKitRoom token serverUrl connect video=false audio=true> , which:
+  - Connects browser to LiveKit via WebRTC
+  - Publishes microphone track
+  - Subscribes to remote agent/avatar tracks
+  - Provides context via hooks.
+    Inside: <ConnectedView> renders avatar, status display, participant badges; <RoomAudioRenderer> auto-plays remote audio; <ControlBar> renders mic toggle + leave.
+- ConnectedView UI logic : Finds agent participant (prefers identity anam-avatar-agent → then agent-* → then voice-agent-rag ) and renders its video via <ParticipantView> (manually attaches/detaches tracks on video/audio refs on track events). UI status display reads from detailedState which is driven by LiveKit dataReceived events — when the worker publish_data({type:"agent_status", status, tool_name}) is sent, the frontend parses and shows emoji (👂🤔🔊🔧✨❌), status text, and CSS animations: wave bars for listening/speaking, dots for thinking, spinner for calling_tool, different colored status-display borders per state. Remote participants listed as badges in top-right (avatar excluded from human badge list). Participant metadata document_id flows to the agent via token, driving RAG filter. Human participant count drives room cleanup.
+### End-to-End Execution of One User Utterance (Step-by-Step Micro-Trace)
+When user says "My name is Salman" into the microphone:
+
+1. Browser mic captures PCM 48kHz stereo → Opus encoded via WebRTC → LiveKit
+2. LiveKit relays to worker; agent subscribed AUDIO_ONLY → receives PCM 16kHz mono
+3. Silero VAD classifies → speech_start → VAD_START fires
+4. PCM chunks sent to Speechmatics RT WebSocket
+5. Speechmatics returns partial then final transcript with S1 tag
+6. STT uses known_speakers relabel: if S1 matches existing voiceprints, format becomes <Ty Hardin>My name is Salman</Ty Hardin> . If unknown, <S1>My name is Salman</S1> .
+7. SMART_TURN + VAD_END signals end of utterance
+8. UserInputTranscribedEvent fires with transcript
+9. AgentSession builds ChatContext: system prompt + all prior messages + new user msg with speaker tag
+10. Calls HuggingFaceLLM.chat(chat_ctx, tools=[assign_name..., search_docs...], tool_choice="auto")
+11. HuggingFaceLLMStream calls HF API with messages[] + OpenAI tools[]
+12. zai-org/GLM-5.2 reasons: user said "My name is X", speaker S1 unknown → must call assign_name_2_speaker_ids
+13. HF streams tool call JSON chunks; stream class accumulates partial JSON; when valid, emits FunctionToolCall
+14. Agent framework invokes assign_name_2_speaker_ids("Salman")
+15. Inside tool: stt.get_speaker_ids() → current voiceprints → normalize → check overlap → no match with existing → new SpeakerIdentifier("Salman", [...ids]) → save_speakers(speakers.json) writes to disk → returns "Got it! I'll remember you as Salman."
+16. Framework appends tool return to ChatContext
+17. Second LLM call with updated context — this time no tool needed; model streams "Nice to meet you, Salman." token by token
+18. Each ChatChunk content delta feeds TTS: Cartesia receives text, streams 24kHz PCM chunks back
+19. AgentSession publishes PCM as agent audio track → LiveKit → browser subscribed
+20. ANAM avatar also receives audio reference from session.start(session, room) hook → animates face publishing video track
+21. Browser audio plays; <video> shows animated avatar; on_agent_state_changed sends status "speaking" → frontend shows orange wave animation</video>
+22. After last audio frame, state transitions old=speaking→new=listening → log TTS END + data message "listening" → frontend UI shows 👂 Listening... green waves
+For a document-related utterance "What is our leave policy?", steps 13-16 call search_company_documents instead, which internally calls FastAPI → PineconeService two-pass chat → returns answer as tool result → step 17 generates final speech.
+
+### Room Lifecycle
+- Creation : Auto-created on first user join (LiveKit creates on demand)
+- Agent Assignment : LiveKit dispatches ROOM job to first available worker; worker accepts → calls entrypoint
+- Conversation : Agent speaks / listens until user disconnects
+- Cleanup : On participant_disconnected , if 0 humans (filtered: agent-*, voice-agent-rag, anam-avatar-agent excluded), worker calls ctx.delete_room() , preventing stale room blocking room-name reuse. Worker shutdown additionally runs same check via ctx.add_shutdown_callback(on_shutdown) .
+### Key Architectural Constraints Enforced (Per Project Memory)
+1. No signal.signal in jobs : Cleanup uses ctx.add_shutdown_callback exclusively — on_shutdown at worker.py L854-858 .
+2. All LiveKit event handlers are sync : @ctx.room.on(...) and @session.on(...) handlers are declared with def not async def . Async operations inside use asyncio.create_task(...) .
+3. Tool call accumulation with JSON validation : HuggingFaceLLMStream doesn't emit tool calls until json.loads(arguments) succeeds, preventing malformed JSON from reaching agent framework's function execution.
+4. Rooms explicitly deleted : ctx.delete_room() in check_and_delete_room with guard room_deleted boolean. This prevents stale LiveKit room state from blocking room name reuse.
+5. Room SID access pattern : Uses getattr(ctx.job, "room_sid", None) or getattr(ctx.room, "sid", None) or getattr(ctx.room, "room_sid", None) to avoid logging coroutine objects from property-as-accessor patterns.
+6. Participant distinction for cleanup : Remaining participants filtered by NOT (identity.startswith("agent-") OR identity == "voice-agent-rag") to avoid treating agent/avatar as humans.
+7. Speaker diarization integration : known_speakers list is persisted via speakers.json; every entrypoint startup reloads it; Speechmatics applies name relabeling so LLM sees <Name>Transcript</Name> which is directly readable by the system prompt rules — no separate speaker lookup pipeline needed in LLM layer.
+8. Strict parity with provider format : chat_ctx converts to openai format; tools convert with build_strict_openai_schema — this is why a non-OpenAI provider endpoint works seamlessly with LiveKit's tool calling logic.
+
+6/6 done
+
+Explore project folder structure (frontend + backend)
+
+Read all backend source files (entry points, APIs, services, utilities)
+
+Read all frontend source files (components, hooks, services, configuration)
+
+Analyze LiveKit integration and agent pipeline
+
+Analyze AI components (LLM, STT, TTS, VAD, RAG, Tool calling)
+
+Generate complete technical report with all 25 sections
+
+The complete technical report covering Sections 16 through 25 is above. Every section is grounded strictly in the source code you provided, with exact file links, line references, class names, function signatures, model names, and configuration values.
+
+To recap what is covered:
+
+- 16. External Services — 9 services with env vars, purposes, init locations, and usage files; explicitly flags Google/Deepgram as installed but unused
+- 17. Environment Variables — 14 env vars with type, defaults, purpose, and every consumer file
+- 18. Sequence Diagram — 104-step text-based trace from user opening the page through the entire RAG tool call to room cleanup
+- 19. Important Classes — 9 classes with base classes, responsibilities, fields, key methods, singletons where applicable
+- 20. Important Functions — 12 functions with exact inputs/outputs, call sites, and internal step breakdowns
+- 21. Data Flow — 7 separate flows (Audio, Text, Tokens, Messages, Events, Tool Responses, RAG Documents) traced end-to-end
+- 22. Error Handling — 9 subsections covering every failure point with exact catch blocks, retry logic (3 retries for LLM, 2-pass for RAG), timeouts, and always-return policies for tools
+- 23. Technologies Used — 54-row table with Technology, Version, Purpose, and File Location for everything from React 18 to livekit-agents 1.5.17 to ONNX Runtime
+- 24. Dependencies — 18 library groups each with an explanation of why it's included and which code paths depend on it
+- 25. Final Architecture Summary — Six-layer description (Infrastructure → FastAPI → Worker → RAG → Registry → Frontend) + micro-trace of one specific utterance ("My name is Salman") + room lifecycle + 8 explicit architectural constraints enforced per project memory rules
+

@@ -1,0 +1,645 @@
+Absolutely. Based on everything we have inspected so far, here is the technical integration summary that can serve as a reference for anyone implementing Ditto Talking Head with LiveKit + Cartesia TTS in the future.
+
+LiveKit → Cartesia → Ditto Integration Summary
+1. Overall target architecture
+
+The final architecture we are working toward is:
+
+                    ┌──────────────────┐
+                    │      User        │
+                    │  Speaks into mic │
+                    └────────┬─────────┘
+                             │
+                             ▼
+                    ┌──────────────────┐
+                    │      LiveKit     │
+                    │      Room        │
+                    └────────┬─────────┘
+                             │
+                             ▼
+                    ┌──────────────────┐
+                    │       STT        │
+                    │   Speechmatics   │
+                    └────────┬─────────┘
+                             │
+                             ▼
+                    ┌──────────────────┐
+                    │       LLM        │
+                    │   Agent Logic    │
+                    └────────┬─────────┘
+                             │
+                             ▼
+                    ┌──────────────────┐
+                    │      Cartesia    │
+                    │       TTS        │
+                    └────────┬─────────┘
+                             │
+                    SynthesizedAudio
+                             │
+                             ▼
+              ┌─────────────────────────────┐
+              │      Ditto TalkingHead      │
+              │                             │
+              │  Audio → Facial Motion      │
+              │          ↓                  │
+              │      Video Frames           │
+              └─────────────┬───────────────┘
+                            │
+                            ▼
+                    ┌──────────────────┐
+                    │     Frontend     │
+                    │  Avatar Video    │
+                    └──────────────────┘
+
+The critical integration point is therefore:
+
+Cartesia
+   ↓
+LiveKit TTS pipeline
+   ↓
+SynthesizedAudio
+   ↓
+AudioFrame
+   ↓
+PCM audio bytes
+   ↓
+Ditto
+   ↓
+video frames
+2. What SynthesizedAudio actually is
+
+We inspected the exact class in your installed LiveKit version:
+
+venv\Lib\site-packages\livekit\agents\tts\tts.py
+
+Its definition is:
+
+@dataclass
+class SynthesizedAudio:
+    frame: rtc.AudioFrame
+    request_id: str
+    is_final: bool = False
+    segment_id: str = ""
+    delta_text: str = ""
+
+So SynthesizedAudio is not the raw audio itself.
+
+It is a wrapper around a LiveKit:
+
+rtc.AudioFrame
+
+The important property is:
+
+ev.frame
+
+and the actual audio samples are available through:
+
+ev.frame.data
+
+Therefore:
+
+audio_bytes = ev.frame.data.tobytes()
+
+is the important data extraction step for Ditto.
+
+3. What information does AudioFrame contain?
+
+The rtc.AudioFrame contains information such as:
+
+frame.data
+frame.sample_rate
+frame.num_channels
+frame.samples_per_channel
+frame.duration
+
+Conceptually:
+
+AudioFrame
+├── data
+│   └── PCM audio samples
+├── sample_rate
+├── num_channels
+├── samples_per_channel
+└── duration
+
+For Ditto, the primary thing we need is:
+
+frame.data
+
+converted into bytes:
+
+frame.data.tobytes()
+
+But we also need to preserve/verify the audio format expected by Ditto:
+
+sample_rate
+num_channels
+PCM format
+
+This will be important when we inspect your actual worker.py.
+
+4. How LiveKit generates SynthesizedAudio
+
+We traced the actual internal LiveKit implementation.
+
+The path is approximately:
+
+TTS Provider
+    ↓
+AudioEmitter
+    ↓
+AudioEmitter._main_task()
+    ↓
+SynthesizedAudio(...)
+    ↓
+SynthesizeStream / ChunkedStream
+
+The critical section is inside AudioEmitter._main_task().
+
+LiveKit eventually executes:
+
+SynthesizedAudio(
+    frame=frame,
+    request_id=self._request_id,
+    segment_id=segment_ctx.segment_id,
+    is_final=is_final,
+)
+
+Therefore:
+
+TTS audio
+    ↓
+AudioEmitter
+    ↓
+rtc.AudioFrame
+    ↓
+SynthesizedAudio
+5. AudioEmitter is the bridge inside LiveKit
+
+AudioEmitter is responsible for taking audio produced by a TTS plugin and turning it into LiveKit audio frames/events.
+
+The relevant method is:
+
+AudioEmitter.push(data)
+
+The TTS implementation pushes audio bytes into the emitter:
+
+output_emitter.push(audio_bytes)
+
+Then the emitter processes those bytes and eventually creates:
+
+rtc.AudioFrame
+
+which becomes:
+
+SynthesizedAudio
+
+So the internal flow is:
+
+Cartesia-generated PCM
+        ↓
+AudioEmitter.push()
+        ↓
+AudioEmitter._main_task()
+        ↓
+rtc.AudioFrame
+        ↓
+SynthesizedAudio
+6. SynthesizeStream vs ChunkedStream
+
+We also inspected both LiveKit abstractions.
+
+There are two important TTS mechanisms.
+
+ChunkedStream
+
+Used for non-streamed synthesis:
+
+class ChunkedStream(ABC)
+
+It represents a complete TTS request that can produce multiple audio chunks.
+
+Its _run() receives:
+
+output_emitter: AudioEmitter
+SynthesizeStream
+
+Used for streaming TTS:
+
+class SynthesizeStream(ABC)
+
+It provides:
+
+push_text()
+flush()
+end_input()
+
+This is particularly important for real-time voice agents.
+
+The conceptual flow is:
+
+LLM generates text
+       ↓
+SynthesizeStream.push_text()
+       ↓
+Cartesia streaming TTS
+       ↓
+AudioEmitter
+       ↓
+SynthesizedAudio events
+
+For our use case, streaming is preferable because Ditto needs audio progressively rather than waiting for the entire response.
+
+7. How streaming text works
+
+SynthesizeStream receives text through:
+
+push_text(token)
+
+Internally:
+
+self._input_ch.send_nowait(token)
+
+The TTS implementation consumes these text chunks and generates audio.
+
+When a segment finishes:
+
+flush()
+
+is used.
+
+When all text is finished:
+
+end_input()
+
+is called.
+
+Conceptually:
+
+LLM token
+   ↓
+push_text()
+   ↓
+Cartesia
+   ↓
+audio chunk
+   ↓
+SynthesizedAudio
+8. What is_final means
+
+SynthesizedAudio contains:
+
+is_final: bool
+
+This tells us whether the current audio frame is the final frame of the current TTS segment.
+
+For example:
+
+AudioFrame 1 → is_final=False
+AudioFrame 2 → is_final=False
+AudioFrame 3 → is_final=False
+AudioFrame 4 → is_final=True
+
+This is useful for Ditto because it allows us to know when a particular spoken segment has finished.
+
+However, we should not assume that every is_final=False frame corresponds to a particular fixed duration.
+
+9. Important 10 ms detail
+
+LiveKit's AudioEmitter intentionally keeps a small tail of audio:
+
+_TAIL_SAMPLES = self._sample_rate * 10 // 1000
+
+That's approximately 10 ms.
+
+This is done so LiveKit can correctly mark the final audio as:
+
+is_final=True
+
+It does not mean that LiveKit only generates audio every 10 ms.
+
+It is an internal buffering/final-frame mechanism.
+
+This distinction is important when debugging latency.
+
+10. Why we should NOT modify LiveKit's tts.py
+
+We found exactly where SynthesizedAudio is created, but modifying:
+
+site-packages/livekit/agents/tts/tts.py
+
+would be a bad architecture.
+
+Why?
+
+Because:
+
+it modifies a third-party package
+updates can overwrite the changes
+deployment becomes harder
+debugging becomes harder
+the Ditto integration becomes coupled to LiveKit internals
+
+Instead, we should capture the TTS output from our application layer.
+
+Therefore the preferred architecture is:
+
+LiveKit TTS
+      ↓
+SynthesizedAudio
+      ↓
+Our custom integration
+      ↓
+Ditto
+
+rather than:
+
+LiveKit source code
+      ↓
+Modified tts.py
+      ↓
+Ditto
+11. The exact data we ultimately want
+
+At the integration point we want something like:
+
+async for ev in tts_stream:
+    frame = ev.frame
+
+
+    audio_bytes = frame.data.tobytes()
+
+
+    # Send audio_bytes to Ditto
+
+Potentially we also pass:
+
+frame.sample_rate
+frame.num_channels
+frame.samples_per_channel
+frame.duration
+ev.is_final
+
+to our Ditto adapter.
+
+Conceptually:
+
+DittoInput(
+    audio=frame.data.tobytes(),
+    sample_rate=frame.sample_rate,
+    channels=frame.num_channels,
+    is_final=ev.is_final,
+)
+
+The exact Ditto API/adapter will depend on how we integrate your existing Ditto streaming implementation.
+
+12. Ditto's role
+
+From our previous Ditto investigation, Ditto is essentially:
+
+Audio
+  ↓
+Audio feature extraction
+  ↓
+Audio-to-motion
+  ↓
+Motion processing
+  ↓
+3D face warping/rendering
+  ↓
+Video frame
+
+Your current Ditto setup already works in offline mode.
+
+The problem is that we need to transition from:
+
+Complete audio
+       ↓
+Ditto
+       ↓
+Complete video
+
+to:
+
+Audio chunk
+       ↓
+Ditto
+       ↓
+Video frames
+       ↓
+Audio chunk
+       ↓
+Ditto
+       ↓
+Video frames
+13. Offline vs online Ditto
+
+We previously established two modes.
+
+Offline
+Complete Cartesia audio
+        ↓
+      Ditto
+        ↓
+Complete video
+
+Advantages:
+
+better FPS
+easier processing
+Ditto sees complete audio context
+
+But this doesn't work for a real-time voice agent because the user must wait for the entire response.
+
+Online/streaming
+Cartesia
+   ↓
+audio chunk
+   ↓
+Ditto
+   ↓
+video frames
+   ↓
+Frontend
+
+This is what we need for the final system.
+
+The challenge is latency and FPS.
+
+14. Your current Ditto performance constraint
+
+Your RTX 3050 Laptop GPU has:
+
+4 GB VRAM
+
+We observed Ditto PyTorch/ONNX streaming around:
+
+~4–6 FPS
+
+while your offline implementation produces significantly better-looking output because it can process the full audio sequence.
+
+We also observed high GPU utilization during inference.
+
+Therefore, even after correctly connecting:
+
+Cartesia → Ditto
+
+we still have a performance problem separate from the integration problem.
+
+We should solve these independently:
+
+Phase 1
+
+Get:
+
+Cartesia audio → Ditto → video
+
+working correctly.
+
+Phase 2
+
+Optimize:
+
+Ditto FPS
+latency
+GPU utilization
+buffering
+Phase 3
+
+Publish video efficiently to the frontend.
+
+15. Final architecture we should implement
+
+The clean architecture should eventually look like this:
+
+                       LIVEKIT
+                          │
+              ┌───────────┴───────────┐
+              │                       │
+             STT                    Agent
+              │                       │
+              └───────────┬───────────┘
+                          │
+                         LLM
+                          │
+                          ▼
+                       Cartesia
+                          │
+                    TTS audio stream
+                          │
+                          ▼
+                  SynthesizedAudio
+                          │
+                          ▼
+                  rtc.AudioFrame
+                          │
+                    frame.data
+                          │
+                    PCM audio bytes
+                          │
+                          ▼
+                ┌───────────────────┐
+                │   Ditto Adapter   │
+                │                   │
+                │ audio → motion    │
+                │ motion → frame    │
+                └─────────┬─────────┘
+                          │
+                    video frames
+                          │
+                          ▼
+                LiveKit / WebRTC
+                          │
+                          ▼
+                     Frontend
+                          │
+                          ▼
+                     Ditto Avatar
+16. The most important design principle
+
+There are three different layers here, and keeping them separate will make the implementation much easier:
+
+Layer 1 — LiveKit
+
+Responsible for:
+
+STT
+LLM orchestration
+TTS
+AudioFrame
+WebRTC
+Layer 2 — Ditto Adapter
+
+Responsible for:
+
+AudioFrame
+   ↓
+PCM
+   ↓
+Ditto
+   ↓
+video frames
+Layer 3 — Frontend
+
+Responsible for:
+
+video frames
+   ↓
+display avatar
+
+So ideally:
+
+LiveKit
+   │
+   │ SynthesizedAudio
+   ▼
+DittoAdapter
+   │
+   │ VideoFrame
+   ▼
+Frontend
+
+This means Ditto becomes a replaceable avatar backend, rather than something deeply embedded inside the LiveKit agent.
+
+17. What we have NOT determined yet
+
+This is important.
+
+We have now established where the audio exists inside LiveKit, but we have not yet determined the exact application-level hook in your project.
+
+That's why the next step is inspecting your:
+
+worker.py
+
+Specifically, we need to find:
+
+How you instantiate Cartesia.
+How your AgentSession is created.
+How the TTS is passed into the session.
+Whether your current code uses tts.synthesize() or tts.stream().
+Whether LiveKit exposes the TTS stream through an event/hook we can safely consume.
+Where we can insert the Ditto adapter without breaking normal LiveKit audio playback.
+
+Once we inspect that, we can draw the exact implementation path for your project, rather than relying on LiveKit's generic internals.
+
+In short
+
+The single most important discovery so far is:
+
+Cartesia
+   ↓
+AudioEmitter
+   ↓
+rtc.AudioFrame
+   ↓
+SynthesizedAudio
+   ↓
+ev.frame.data.tobytes()
+   ↓
+             ← THIS IS THE AUDIO WE NEED TO GIVE TO DITTO
+   ↓
+Ditto
+   ↓
+Video Frames
+
+So now we are ready to inspect worker.py and find the cleanest real hook for that arrow.
